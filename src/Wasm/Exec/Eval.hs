@@ -212,8 +212,8 @@ step_work vs at i k' cfg =
     genHS [|| throwError $ EvalTrapError at msg ||]
   Returning _  -> {-# SCC step_Returning #-}
     genHS [||throwError $ EvalCrashError at "undefined frame" ||]
-  Breaking _ _ -> {-# SCC step_Breaking #-}
-    genHS [|| throwError $ EvalCrashError at "undefined label" ||]
+  Breaking x _ -> {-# SCC step_Breaking #-}
+    genHS [|| throwError $ EvalCrashError at ("undefined label" ++ show x) ||]
 
   Label _ _ (Code vs' []) -> {-# SCC step_Label1 #-}
     k $ Code (appStack vs' vs) []
@@ -333,10 +333,10 @@ instr vs at e' k' cfg =
     $$(run $ k $ Code vs [Label (length ts) (Func.CompiledFunc $ GenHS [|| \vs -> return vs ||]) (Code emptyStack (map plain es')) @@ at]) ||]
   (Loop _ es', vs)               -> genHS $ [||
     let ll_loop l_vs = do
-          lift $ print @[Value] l_vs
+--          lift $ print @[Value] l_vs
           $$(run $ eval (Code (GenHS [|| l_vs ||]) [Label 0 (Func.CompiledFunc (GenHS [|| ll_loop ||])) (Code emptyStack (map plain es')) @@ at]) cfg)
     in do
-        lift $ print @[Value] $$(runHS vs)
+--        lift $ print @[Value] $$(runHS vs)
         res <- ll_loop $$(runHS vs)
 
         $$(run $ k $ Code (GenHS [|| res ||]) []) ||]
@@ -350,7 +350,8 @@ instr vs at e' k' cfg =
   (BrIf x, vs)          -> {-# SCC step_BrIf1 #-} genHS $ [|| do
     case $$(runHS vs) of
       I32 0 : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [])
-      I32 i : vs' -> lift (print i) >> $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Br x)) @@ at]) ||]
+      I32 i : vs' -> --lift (print i) >>
+                      $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Br x)) @@ at]) ||]
   (BrTable xs x, v) -> genHS $ [|| do
     case $$(runHS vs) of
       (I32 i) : vs' | i < 0 || fromIntegral i >= $$(liftTy $ length xs)  ->
@@ -404,7 +405,7 @@ instr vs at e' k' cfg =
     mut <- throwTH $ local frame x
     [|| case $$(runHS vs) of
           v : vs' -> do
-            lift $ print ("SetMut", v)
+--            lift $ print ("SetMut", v)
             lift $ setMut $$(runHS mut) v
             $$(run $ k $ Code (GenHS [|| vs' ||]) [] ) ||]
 
@@ -414,7 +415,7 @@ instr vs at e' k' cfg =
     mut <- throwTH $ local frame x
     [|| case $$(runHS vs) of
           v : _ -> do
-            lift $ print ("TeeMut", v)
+--            lift $ print ("TeeMut", v)
             lift $ setMut $$(runHS mut) v
             let s' = v : $$(runHS vs)
             $$(run $ k $ Code (GenHS [|| s' ||]) []) ||]
@@ -456,7 +457,7 @@ instr vs at e' k' cfg =
               Just (sz, ext) -> [|| $$(runHS $ Memory.loadPacked sz ext mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS $ liftTy ty)) ||])
             case eres of
               Right v' -> do
-                lift $ print ("loaded", i)
+--                lift $ print ("loaded", i)
                 $$(run $ k (Code (GenHS [|| v' : vs' ||]) []))
               Left exn -> $$(run $ k (Code (GenHS [|| vs' ||]) [Trapping "mem err" @@ at])) ||]
 
@@ -705,15 +706,15 @@ createFunc inst ref f k = do
 setLocals :: [(Value, GenHS (Mutable IO Value))] -> EvalT IO ()
 setLocals [] = genHS [|| return () ||]
 setLocals ((v, var): vs) = genHS [||
-                            (lift $ print ("setLocal", v)) >>
+                            --(lift $ print ("setLocal", v)) >>
                             (lift $ setMut $$(runHS var) v)
                               >> $$(run $ setLocals vs) ||]
 
 setArgs :: [GenHS (Mutable IO Value)] -> GenHS [Value] -> EvalT IO ()
 setArgs [] as = genHS [|| return () ||]
 setArgs (var: vs) as = genHS [|| case $$(runHS as) of
-                                    v : vs' -> (lift $ setMut $$(runHS var) v) >>
-                                                (lift $ print ("setArgs", v))
+                                    v : vs' -> (lift $ setMut $$(runHS var) v)
+--                                              >> (lift $ print ("setArgs", v))
                                                 >> $$(run $ setArgs vs (GenHS [|| vs' ||])) ||]
 
 

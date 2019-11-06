@@ -38,7 +38,8 @@ Library
     text,
     transformers,
     vector,
-    template-haskell
+    template-haskell,
+    primitive
   Exposed-Modules:
     Wasm.Binary.Custom
     Wasm.Binary.Decode

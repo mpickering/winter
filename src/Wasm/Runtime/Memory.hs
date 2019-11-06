@@ -16,7 +16,7 @@ import           Data.Array.ST (newArray, readArray, MArray, STUArray)
 import           Data.Array.Unsafe (castSTUArray)
 import           Data.Bits
 import           Data.Int
-import           Data.Vector (Vector)
+import           Data.Vector (Vector, MVector)
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as VM
 import           Data.Word
@@ -31,8 +31,10 @@ import qualified Wasm.Syntax.Values as Values
 import Language.Haskell.TH (reportError)
 import Language.Haskell.TH.Syntax (unsafeTExpCoerce)
 
+import Control.Monad.Primitive
+
 data MemoryInst m = MemoryInst
-  { _miContent :: GenHS (Mutable m (MVector Word8))
+  { _miContent :: GenHS (Mutable m (MVector (PrimState m) Word8))
   , _miMax :: Maybe Size
   }
 
@@ -63,16 +65,16 @@ withinLimits n = \case
   Nothing -> True
   Just m -> n <= m
 
-create :: Size -> Either MemoryError (Vector Word8)
+create :: PrimMonad m => Size -> Either MemoryError (GenHS (m (MVector (PrimState m) Word8)))
 create n
   | n > 0x10000 = Left MemorySizeOverflow
-  | otherwise   = Right $ V.replicate (fromIntegral (n * pageSize)) 0
+  | otherwise   = Right (GenHS [|| VM.replicate (fromIntegral (n * pageSize)) 0 ||])
 
 alloc :: MemoryType -> (MemoryInst IO -> GenHS (ExceptT e IO r)) -> GenHS ((ExceptT e IO r))
 alloc (Limits min' mmax) k = case create min' of
   Left err -> GenHS (fail (show err))
   Right m -> GenHS [|| do
-    let Right m' = create min'
+    m' <- $$(runHS m)
     mem <- lift $ newMut m'
 --    pure $ assert (withinLimits min' mmax) $
     $$(runHS $ k $ MemoryInst
@@ -83,7 +85,7 @@ alloc (Limits min' mmax) k = case create min' of
 bound :: MemoryInst IO -> GenHS (IO Size)
 bound mem = GenHS $ [|| do
   m <- getMut $$(runHS $ mem^.miContent)
-  pure $ fromIntegral $ V.length m ||]
+  pure $ fromIntegral $ VM.length m ||]
 
 size :: MemoryInst IO -> GenHS (IO Size)
 size mem = GenHS [|| do
@@ -104,20 +106,21 @@ grow mem delta = GenHS $ [|| do
          throwError MemorySizeLimit
      | newSize > 0x10000 ->
          throwError MemorySizeOverflow
-     | otherwise -> do
-         lift $ modifyMut $$((runHS $ mem^.miContent)) $ \v -> V.create $ do
-           mv <- V.thaw v
-           mv' <- VM.grow mv (fromIntegral ($$(runHS delta) * pageSize))
-           forM_ [oldSize * pageSize .. newSize * pageSize - 1] $ \i ->
+     | otherwise -> lift $ do
+          mv <- getMut $$(runHS $ mem^.miContent)
+          mv' <- VM.grow mv (fromIntegral ($$(runHS delta) * pageSize))
+          forM_ [oldSize * pageSize .. newSize * pageSize - 1] $ \i ->
              VM.write mv' (fromIntegral i) 0
-           return mv' ||]
+          setMut $$(runHS $ mem^.miContent) mv' ||]
 
 loadByte :: MemoryInst IO -> GenHS Address -> GenHS (ExceptT MemoryError IO Word8)
 loadByte mem a = GenHS $ [|| do
-  m <- lift $ getMut $$(runHS $ mem^.miContent)
-  case m V.!? fromIntegral $$(runHS a) of
-    Nothing -> throwError MemoryBoundsError
-    Just w  -> pure w ||]
+  bnd <- lift $ $$(runHS $ bound mem)
+  if | $$(runHS a) >= fromIntegral bnd
+        -> throwError MemoryBoundsError
+     | otherwise -> lift $ do
+        mv <- getMut $$(runHS $ mem ^.miContent)
+        VM.read mv (fromIntegral $$(runHS a)) ||]
 
 storeByte :: MemoryInst IO -> GenHS Address -> GenHS Word8
           -> GenHS (ExceptT MemoryError IO ())
@@ -127,9 +130,9 @@ storeByte mem ca cb = GenHS $ [|| do
   bnd <- lift $ $$(runHS $ bound mem)
   if | a >= fromIntegral bnd ->
        throwError MemoryBoundsError
-     | otherwise ->
-       lift $ modifyMut $$(runHS $ mem^.miContent) $
-         V.modify (\vec -> VM.write vec (fromIntegral a) b) ||]
+     | otherwise -> lift $ do
+        mv <- getMut $$(runHS $ mem^.miContent)
+        VM.write mv (fromIntegral a) b ||]
 
 loadBytes :: MemoryInst IO -> GenHS Address -> GenHS Size
           -> GenHS (ExceptT MemoryError IO (Vector Word8))
@@ -142,9 +145,9 @@ storeBytes mem a bs = GenHS $ [|| do
   bnd <- lift $ $$(runHS $ bound mem)
   if | fromIntegral $$(runHS a) + V.length $$(runHS bs) > fromIntegral bnd ->
        throwError MemoryBoundsError
-     | otherwise ->
-       lift $ modifyMut $$(runHS $ mem^.miContent)
-         (V.// zip [fromIntegral $$(runHS a)..] (V.toList $$(runHS bs))) ||]
+     | otherwise -> lift $ do
+        mv <- getMut $$(runHS $ mem ^. miContent)
+        zipWithM_ (VM.write mv) [fromIntegral $$(runHS a)..] (V.toList $$(runHS bs)) ||]
 
 effectiveAddress :: Address -> Offset -> ExceptT MemoryError IO Address
 effectiveAddress a o = do
