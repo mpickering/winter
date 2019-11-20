@@ -3,6 +3,9 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ExplicitForAll #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Wasm.Runtime.Memory where
 
@@ -25,9 +28,11 @@ import           Wasm.Syntax.Memory
 import           Wasm.Syntax.Types
 import           Wasm.Syntax.Values (Value)
 import qualified Wasm.Syntax.Values as Values
+import Language.Haskell.TH (reportError)
+import Language.Haskell.TH.Syntax (unsafeTExpCoerce)
 
 data MemoryInst m = MemoryInst
-  { _miContent :: Mutable m (Vector Word8)
+  { _miContent :: GenHS (Mutable m (Vector Word8))
   , _miMax :: Maybe Size
   }
 
@@ -63,122 +68,134 @@ create n
   | n > 0x10000 = Left MemorySizeOverflow
   | otherwise   = Right $ V.replicate (fromIntegral (n * pageSize)) 0
 
-alloc :: (MonadRef m, Monad m)
-      => MemoryType -> ExceptT MemoryError m (MemoryInst m)
-alloc (Limits min' mmax) = case create min' of
-  Left err -> throwError err
-  Right m -> do
-    mem <- lift $ newMut m
-    pure $ assert (withinLimits min' mmax) $
-      MemoryInst
-        { _miContent = mem
-        , _miMax = mmax
-        }
+alloc :: MemoryType -> (MemoryInst IO -> GenHS (ExceptT e IO r)) -> GenHS ((ExceptT e IO r))
+alloc (Limits min' mmax) k = case create min' of
+  Left err -> GenHS (fail (show err))
+  Right m -> GenHS [|| do
+    let Right m' = create min'
+    mem <- lift $ newMut m'
+--    pure $ assert (withinLimits min' mmax) $
+    $$(runHS $ k $ MemoryInst
+            { _miContent = GenHS [|| mem ||]
+            , _miMax = mmax
+            } ) ||]
 
-bound :: (MonadRef m, Monad m) => MemoryInst m -> m Size
-bound mem = do
-  m <- getMut (mem^.miContent)
-  pure $ fromIntegral $ V.length m
+bound :: MemoryInst IO -> GenHS (IO Size)
+bound mem = GenHS $ [|| do
+  m <- getMut $$(runHS $ mem^.miContent)
+  pure $ fromIntegral $ V.length m ||]
 
-size :: (MonadRef m, Monad m) => MemoryInst m -> m Size
-size mem = liftM2 div (bound mem) (pure pageSize)
+size :: MemoryInst IO -> GenHS (IO Size)
+size mem = GenHS [|| do
+  b <- $$(runHS $ bound mem)
+  return (b `div` pageSize)
+  ||]
 
-typeOf :: (MonadRef m, Monad m) => MemoryInst m -> m MemoryType
-typeOf mem = Limits <$> size mem <*> pure (mem^.miMax)
+typeOf :: MemoryInst IO -> GenHS (IO MemoryType)
+typeOf mem = GenHS [|| Limits <$> $$(runHS $ size mem) <*> pure $$(liftTy (mem^.miMax)) ||]
 
-grow :: (MonadRef m, Monad m)
-     => MemoryInst m -> Size -> ExceptT MemoryError m ()
-grow mem delta = do
-  oldSize <- lift $ size mem
-  let newSize = oldSize + delta
+grow :: MemoryInst IO -> GenHS Size -> GenHS (ExceptT MemoryError IO ())
+grow mem delta = GenHS $ [|| do
+  oldSize <- lift $ $$(runHS $ size mem)
+  let newSize = oldSize + $$(runHS delta)
   if | oldSize > newSize ->
          throwError MemorySizeOverflow
-     | not (withinLimits newSize (mem^.miMax)) ->
+     | not (withinLimits newSize $$(liftTy (mem^.miMax))) ->
          throwError MemorySizeLimit
      | newSize > 0x10000 ->
          throwError MemorySizeOverflow
      | otherwise -> do
-         lift $ modifyMut (mem^.miContent) $ \v -> V.create $ do
+         lift $ modifyMut $$((runHS $ mem^.miContent)) $ \v -> V.create $ do
            mv <- V.thaw v
-           mv' <- VM.grow mv (fromIntegral (delta * pageSize))
+           mv' <- VM.grow mv (fromIntegral ($$(runHS delta) * pageSize))
            forM_ [oldSize * pageSize .. newSize * pageSize - 1] $ \i ->
              VM.write mv' (fromIntegral i) 0
-           return mv'
+           return mv' ||]
 
-loadByte :: (MonadRef m, Monad m)
-         => MemoryInst m -> Address -> ExceptT MemoryError m Word8
-loadByte mem a = do
-  m <- lift $ getMut (mem^.miContent)
-  case m V.!? fromIntegral a of
+loadByte :: MemoryInst IO -> GenHS Address -> GenHS (ExceptT MemoryError IO Word8)
+loadByte mem a = GenHS $ [|| do
+  m <- lift $ getMut $$(runHS $ mem^.miContent)
+  case m V.!? fromIntegral $$(runHS a) of
     Nothing -> throwError MemoryBoundsError
-    Just w  -> pure w
+    Just w  -> pure w ||]
 
-storeByte :: (MonadRef m, Monad m)
-          => MemoryInst m -> Address -> Word8
-          -> ExceptT MemoryError m ()
-storeByte mem a b = do
-  bnd <- lift $ bound mem
+storeByte :: MemoryInst IO -> GenHS Address -> GenHS Word8
+          -> GenHS (ExceptT MemoryError IO ())
+storeByte mem ca cb = GenHS $ [|| do
+  let a = $$(runHS ca)
+      b = $$(runHS cb)
+  bnd <- lift $ $$(runHS $ bound mem)
   if | a >= fromIntegral bnd ->
        throwError MemoryBoundsError
      | otherwise ->
-       lift $ modifyMut (mem^.miContent) $
-         V.modify (\vec -> VM.write vec (fromIntegral a) b)
+       lift $ modifyMut $$(runHS $ mem^.miContent) $
+         V.modify (\vec -> VM.write vec (fromIntegral a) b) ||]
 
-loadBytes :: (MonadRef m, Monad m)
-          => MemoryInst m -> Address -> Size
-          -> ExceptT MemoryError m (Vector Word8)
-loadBytes mem a n = V.generateM (fromIntegral n) $ \i ->
-  loadByte mem (a + fromIntegral i)
+loadBytes :: MemoryInst IO -> GenHS Address -> GenHS Size
+          -> GenHS (ExceptT MemoryError IO (Vector Word8))
+loadBytes mem a n = GenHS [|| V.generateM (fromIntegral $$(runHS n)) $ \i ->
+  $$(runHS $ loadByte mem (GenHS [|| ($$(runHS a) + fromIntegral i) ||]))  ||]
 
-storeBytes :: (MonadRef m, Monad m)
-           => MemoryInst m -> Address -> Vector Word8
-           -> ExceptT MemoryError m ()
-storeBytes mem a bs = do
-  bnd <- lift $ bound mem
-  if | fromIntegral a + V.length bs > fromIntegral bnd ->
+storeBytes :: MemoryInst IO -> GenHS Address -> GenHS (Vector Word8)
+           -> GenHS (ExceptT MemoryError IO ())
+storeBytes mem a bs = GenHS $ [|| do
+  bnd <- lift $ $$(runHS $ bound mem)
+  if | fromIntegral $$(runHS a) + V.length $$(runHS bs) > fromIntegral bnd ->
        throwError MemoryBoundsError
      | otherwise ->
-       lift $ modifyMut (mem^.miContent)
-         (V.// zip [fromIntegral a..] (V.toList bs))
+       lift $ modifyMut $$(runHS $ mem^.miContent)
+         (V.// zip [fromIntegral $$(runHS a)..] (V.toList $$(runHS bs))) ||]
 
-effectiveAddress :: Monad m
-                 => Address -> Offset -> ExceptT MemoryError m Address
+effectiveAddress :: Address -> Offset -> ExceptT MemoryError IO Address
 effectiveAddress a o = do
   let ea = a + fromIntegral o
   if ea < a
     then throwError MemoryBoundsError
     else pure ea
 
-loadn :: (MonadRef m, Monad m)
-      => MemoryInst m -> Address -> Offset -> Size
-      -> ExceptT MemoryError m Int64
-loadn mem a o n =
-  assert (n > 0 && n <= 8) $ do
-    addr <- effectiveAddress a o
-    loop addr n
- where
-  loop a' n' =
-     if n' == 0
-     then pure 0
-     else do
-       r <- loop (a' + 1) (n' - 1)
-       let x = shiftL r 8
-       b <- loadByte mem a'
-       pure $ fromIntegral b .|. x
+loadn :: MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Size
+      -> GenHS (ExceptT MemoryError IO Int64)
+loadn mem a o n = GenHS $ [||
+  let
+    loop a' n' =
+       if n' == 0
+        then pure 0
+        else do
+          r <- loop (a' + 1) (n' - 1)
+          let x = shiftL r 8
+          b <- $$(runHS $ loadByte mem (GenHS [|| a' ||]))
+          pure $ fromIntegral b .|. x
+  in assert ($$(runHS n) > 0 && $$(runHS n) <= 8) $ do
+      addr <- effectiveAddress $$(runHS a) $$(runHS o)
+      loop addr $$(runHS n)
+  ||]
 
-storen :: (MonadRef m, Monad m)
-       => MemoryInst m -> Address -> Offset -> Size -> Int64
-       -> ExceptT MemoryError m ()
-storen mem a o n x =
-  assert (n > 0 && n <= 8) $ do
-    addr <- effectiveAddress a o
-    loop addr n x
- where
-  loop a' n' x'
-    | n' <= 0 = return ()
-    | otherwise = do
-      loop (a' + 1) (n' - 1) (shiftR x' 8)
-      storeByte mem a' (fromIntegral x' .&. 0xff)
+storen ::
+          MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Size -> GenHS Int64
+       -> GenHS (ExceptT MemoryError IO ())
+storen mem ca co cn cx = GenHS $ [||
+  let a = $$(runHS ca)
+      o = $$(runHS co)
+      n = $$(runHS cn)
+      x = $$(runHS cx)
+  in assert (n > 0 && n <= 8) $ do
+      addr <- effectiveAddress a o
+      $$(runHS $ storen_loop mem (GenHS [|| addr ||]) cn cx)
+      ||]
+
+storen_loop :: MemoryInst IO -> GenHS Address -> GenHS Size -> GenHS Int64 -> GenHS (ExceptT MemoryError IO ())
+storen_loop mem addr n x = GenHS [||
+    let loop :: Address -> Size -> Int64 -> ExceptT MemoryError IO ()
+        loop a' n' x'
+          | n' <= 0 = return ()
+          | otherwise = do
+            loop (a' + 1) (n' - 1) (shiftR x' 8)
+
+            let x'' :: Word8
+                x'' = fromIntegral x' .&. 0xff
+            $$(runHS $ storeByte mem (GenHS [|| a' ||]) (GenHS [|| x'' ||]) )
+    in loop $$(runHS addr) $$(runHS n) $$(runHS x)
+    ||]
 
 cast :: (MArray (STUArray s) a (ST s), MArray (STUArray s) b (ST s))
      => a -> ST s b
@@ -197,26 +214,25 @@ doubleToBits x = runST (cast x)
 doubleFromBits :: Int64 -> Double
 doubleFromBits x = runST (cast x)
 
-loadValue :: (MonadRef m, Monad m)
-          => MemoryInst m -> Address -> Offset -> ValueType
-          -> ExceptT MemoryError m Value
-loadValue mem a o t =
-  loadn mem a o (valueTypeSize t) >>= \n -> pure $ case t of
+loadValue :: MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS ValueType
+          -> GenHS (ExceptT MemoryError IO Value)
+loadValue mem a o t = GenHS [||
+  $$(runHS $ loadn mem a o (GenHS [|| (valueTypeSize $$(runHS t)) ||])) >>= \n -> pure $ case $$(runHS t) of
     I32Type -> Values.I32 (fromIntegral n)
     I64Type -> Values.I64 n
     F32Type -> Values.F32 (floatFromBits (fromIntegral n))
-    F64Type -> Values.F64 (doubleFromBits n)
+    F64Type -> Values.F64 (doubleFromBits n) ||]
 
-storeValue :: (MonadRef m, Monad m)
-           => MemoryInst m -> Address -> Offset -> Value
-           -> ExceptT MemoryError m ()
-storeValue mem a o v =
-  let x = case v of
+storeValue ::
+              MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Value
+           -> GenHS (ExceptT MemoryError IO ())
+storeValue mem a o v = GenHS [||
+  let x = case $$(runHS v) of
         Values.I32 y -> fromIntegral y
         Values.I64 y -> y
         Values.F32 y -> fromIntegral $ floatToBits y
         Values.F64 y -> doubleToBits y
-  in storen mem a o (valueTypeSize (Values.typeOf v)) x
+  in $$(runHS $ storen mem a o (GenHS [|| (valueTypeSize (Values.typeOf $$(runHS v))) ||]) (GenHS [|| x ||])) ||]
 
 -- jww (2018-10-31): Is this type signature correct?
 extend :: Address -> Offset -> Extension -> Address
@@ -224,32 +240,33 @@ extend x n = \case
   ZX -> x
   SX -> let sh = 64 - 8 * fromIntegral n in shiftR (shiftL x sh) sh
 
-loadPacked :: (MonadRef m, Monad m)
-           => PackSize
+loadPacked ::
+            PackSize
            -> Extension
-           -> MemoryInst m
-           -> Address
-           -> Offset
-           -> ValueType
-           -> ExceptT MemoryError m Value
-loadPacked sz ext mem a o t =
-  assert (packedSize sz <= valueTypeSize t) $ do
+           -> MemoryInst IO
+           -> GenHS Address
+           -> GenHS Offset
+           -> GenHS ValueType
+           -> GenHS (ExceptT MemoryError IO Value)
+loadPacked sz ext mem a o t = GenHS $ [||
+  assert (packedSize sz <= valueTypeSize $$(runHS t)) $ do
     let n = packedSize sz
-    v <- loadn mem a o n
+    v <- $$(runHS $ loadn mem a o (GenHS [|| n ||]))
+    let n = packedSize sz
     let x = extend v n ext
-    case t of
+    case $$(runHS t) of
       I32Type -> pure $ Values.I32 (fromIntegral x)
       I64Type -> pure $ Values.I64 x
-      _ -> throwError MemoryTypeError
+      _ -> throwError MemoryTypeError ||]
 
-storePacked :: (MonadRef m, Monad m)
-            => PackSize -> MemoryInst m -> Address -> Offset -> Value
-            -> ExceptT MemoryError m ()
-storePacked sz mem a o v =
-  assert (packedSize sz <= valueTypeSize (Values.typeOf v)) $ do
+storePacked ::
+               PackSize -> MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Value
+            -> GenHS (ExceptT MemoryError IO ())
+storePacked sz mem a o v = GenHS [||
+  assert (packedSize sz <= valueTypeSize (Values.typeOf $$(runHS v))) $ do
     let n = packedSize sz
-    x <- case v of
+    x <- case $$(runHS v) of
           Values.I32 y -> pure $ fromIntegral y
           Values.I64 y -> pure y
           _ -> throwError MemoryTypeError
-    storen mem a o n x
+    $$(runHS $ storen mem a o (GenHS [|| n ||]) (GenHS [|| x ||])) ||]

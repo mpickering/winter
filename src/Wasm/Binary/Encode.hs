@@ -213,6 +213,9 @@ putMemoryOp MemoryOp {..} = do
   putULEB128 _memoryAlignment
   putULEB128 _memoryOffset
 
+instance MonadFail PutM where
+  fail = error
+
 putInstr :: Encodable phrase => Instr phrase -> Put
 putInstr = flip (.) unFix $ \case
 

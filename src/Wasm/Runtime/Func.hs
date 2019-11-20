@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Wasm.Runtime.Func where
 
@@ -11,22 +12,27 @@ import Wasm.Syntax.Types
 import Wasm.Syntax.Values
 import Wasm.Util.Source
 import Lens.Micro.Platform
+import Wasm.Exec.EvalTypes
 
 data FuncInst f m a
   = AstFunc FuncType a (f (Func f))
-  | HostFunc FuncType ([Value] -> [Value])
-  | HostFuncEff FuncType ([Value] -> m [Value])
+  | CompFunc FuncType CompiledFunc
+  | HostFunc FuncType (WQ ([Value] -> [Value]))
+  | HostFuncEff FuncType (WQ ([Value] -> m [Value]))
   deriving (Functor, Foldable, Traversable)
+
+type ModuleRef      = Int
+type ModuleFunc f m = FuncInst f m ModuleRef
 
 _AstFunc :: Traversal' (FuncInst f m a) (FuncType, a, f (Func f))
 _AstFunc f (AstFunc x y z) = (\(x',y',z') -> AstFunc x' y' z') <$> f (x, y, z)
 _AstFunc _ x = pure x
 
-_HostFunc :: Traversal' (FuncInst f m a) (FuncType, [Value] -> [Value])
+_HostFunc :: Traversal' (FuncInst f m a) (FuncType, WQ ([Value] -> [Value]))
 _HostFunc f (HostFunc x y) = (\(x',y') -> HostFunc x' y') <$> f (x, y)
 _HostFunc _ x = pure x
 
-_HostFuncEff :: Traversal' (FuncInst f m a) (FuncType, [Value] -> m [Value])
+_HostFuncEff :: Traversal' (FuncInst f m a) (FuncType, WQ ([Value] -> m [Value]))
 _HostFuncEff f (HostFuncEff x y) = (\(x',y') -> HostFuncEff x' y') <$> f (x, y)
 _HostFuncEff _ x = pure x
 
@@ -71,10 +77,16 @@ instance (Regioned f, Show1 f) => Show1 (FuncInst f m) where
 alloc :: FuncType -> a -> f (Func f) -> FuncInst f m a
 alloc = AstFunc
 
-allocHost :: FuncType -> ([Value] -> [Value]) -> FuncInst f m a
+data CompiledFunc = CompiledFunc { getComp :: GenHS ([Value] -> EvalTHS IO [Value]) }
+data RuntimeFunc = RuntimeFunc { runFunc :: [Value] -> EvalTHS IO [Value] }
+
+allocCompiled :: FuncType -> CompiledFunc -> FuncInst f m a
+allocCompiled = CompFunc
+
+allocHost :: FuncType -> WQ ([Value] -> [Value]) -> FuncInst f m a
 allocHost = HostFunc
 
-allocHostEff :: FuncType -> ([Value] -> m [Value]) -> FuncInst f m a
+allocHostEff :: FuncType -> WQ ([Value] -> m [Value]) -> FuncInst f m a
 allocHostEff = HostFuncEff
 
 typeOf :: FuncInst f m a -> FuncType
@@ -82,3 +94,4 @@ typeOf = \case
   AstFunc ft _ _ -> ft
   HostFunc ft _ -> ft
   HostFuncEff ft _ -> ft
+  CompFunc ft _ -> ft

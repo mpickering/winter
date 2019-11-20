@@ -20,7 +20,7 @@ type Size = Int32
 type Index = Int32
 
 data TableInst m elem = TableInst
-  { _tiContent :: Mutable m (Vector (Maybe elem))
+  { _tiContent :: GenHS (Mutable m (Vector (Maybe elem)))
   , _tiMax :: Maybe Size
   , _tiElemType :: ElemType
   }
@@ -44,52 +44,51 @@ withinLimits sz = \case
 create :: Size -> Vector (Maybe a)
 create sz = V.replicate (fromIntegral sz) Nothing
 
-alloc :: (MonadRef m, Monad m)
-      => TableType -> ExceptT TableError m (TableInst m a)
-alloc (TableType elemType (Limits min' mmax)) = do
+alloc :: TableType ->
+         (TableInst IO a -> GenHS (ExceptT e IO r))
+         -> GenHS (ExceptT e IO r)
+alloc (TableType elemType (Limits min' mmax)) k = GenHS $ [|| do
   tbl <- lift $ newMut (create min')
-  pure $ assert (withinLimits min' mmax) $
-    TableInst
-      { _tiContent = tbl
-      , _tiMax = mmax
-      , _tiElemType = elemType
-      }
+  $$(runHS $ k $ TableInst
+          { _tiContent = (GenHS [|| tbl ||])
+          , _tiMax = mmax
+          , _tiElemType = elemType
+          }) ||]
 
-size :: (MonadRef m, Monad m) => TableInst m a -> m Size
-size tab = do
-  content <- getMut (tab^.tiContent)
-  pure $ fromIntegral $ V.length content
+size :: TableInst IO a -> GenHS (IO Size)
+size tab = GenHS [|| do
+  content <- getMut $$(runHS $ tab^.tiContent)
+  pure $ fromIntegral $ V.length content ||]
 
-typeOf :: (MonadRef m, Monad m) => TableInst m a -> m TableType
-typeOf tab = do
-  sz <- size tab
-  pure $ TableType (tab^.tiElemType) (Limits sz (tab^.tiMax))
+typeOf :: TableInst IO a -> GenHS (IO TableType)
+typeOf tab = GenHS [|| do
+  sz <- $$(runHS $ size tab)
+  pure $ TableType $$(liftTy $ tab^.tiElemType) (Limits sz $$(liftTy $ tab^.tiMax)) ||]
 
-grow :: (MonadRef m, Monad m)
-     => TableInst m a -> Size -> ExceptT TableError m ()
-grow tab delta = do
-  oldSize <- lift $ size tab
+grow :: TableInst IO a -> Size -> GenHS (IO ())
+grow tab delta = GenHS [|| do
+  oldSize <- $$(runHS $ size tab)
   let newSize = oldSize + delta
   if oldSize > newSize
-    then throwError TableSizeOverflow
-    else if not (withinLimits newSize (tab^.tiMax))
-         then throwError TableSizeLimit
-         else lift $ modifyMut (tab^.tiContent) $ \v -> V.create $ do
+    then $$(fail (show TableSizeOverflow))
+    else if not (withinLimits newSize $$(liftTy (tab^.tiMax)))
+         then $$(fail (show TableSizeLimit))
+         else modifyMut $$(runHS $ tab^.tiContent) $ \v -> V.create $ do
            mv <- V.thaw v
-           VM.grow mv (fromIntegral (newSize - oldSize))
+           VM.grow mv (fromIntegral (newSize - oldSize)) ||]
 
-load :: (MonadRef m, Monad m) => TableInst m a -> Index -> m (Maybe a)
-load tab i = do
-  content <- getMut (tab^.tiContent)
-  pure $ join $ content V.!? fromIntegral i
+load :: TableInst IO a -> GenHS Index -> GenHS (IO (Maybe a))
+load tab i = GenHS [|| do
+  content <- getMut $$(runHS $ tab^.tiContent)
+  pure $ join $ content V.!? fromIntegral $$(runHS i) ||]
 
-store :: MonadRef m => TableInst m a -> Index -> a -> m ()
-store tab i v =
-  modifyMut (tab^.tiContent) $
-    V.modify (\vec -> VM.write vec (fromIntegral i) (Just v))
+store :: TableInst IO a -> GenHS Index -> GenHS a -> GenHS (IO ())
+store tab i v = GenHS [||
+  modifyMut $$(runHS $ tab^.tiContent) $
+    V.modify (\vec -> VM.write vec (fromIntegral $$(runHS i)) (Just $$(runHS v))) ||]
 
-blit :: MonadRef m => TableInst m a -> Index -> Vector a -> m ()
-blit tab offset elems =
+blit :: TableInst IO a -> GenHS Index -> GenHS (Vector a) -> GenHS (IO ())
+blit tab offset elems = GenHS [||
   -- V.blit dat 0l (tab^.tiContent) offset (V.length dat)
-  modifyMut (tab^.tiContent)
-    (V.// zip [fromIntegral offset..] (map Just (V.toList elems)))
+  modifyMut $$(runHS $ tab^.tiContent)
+    (V.// zip [fromIntegral $$(runHS offset)..] (map Just (V.toList $$(runHS elems)))) ||]

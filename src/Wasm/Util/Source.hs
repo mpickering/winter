@@ -6,6 +6,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveLift #-}
 
 module Wasm.Util.Source where
 
@@ -18,12 +19,15 @@ import           Data.Maybe
 import           GHC.Generics
 import           Lens.Micro.Platform
 import           Text.Printf
+import Language.Haskell.TH.Syntax
 
 infixl 5 @@
 
 class Traversable phrase => Regioned phrase where
   region :: phrase a -> Region
   (@@) :: a -> Region -> phrase a
+
+
 
 instance Regioned Identity where
   region = def
@@ -36,7 +40,7 @@ data Position
   { _posFile   :: !FilePath
   , _posLine   :: !Int64
   , _posColumn :: !Int64
-  } deriving (Eq, Generic, NFData)
+  } deriving (Eq, Generic, NFData, Lift)
 
 instance Default Position where
   def = Position def def def
@@ -52,7 +56,7 @@ data Region
   = Region
   { _regionLeft  :: !Position
   , _regionRight :: !Position
-  } deriving (Eq, Generic, NFData)
+  } deriving (Eq, Generic, NFData, Lift)
 
 instance Default Region where
   def = Region def def

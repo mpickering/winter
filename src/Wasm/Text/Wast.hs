@@ -22,7 +22,7 @@ module Wasm.Text.Wast
   , WasmEngine(..)
   , _Constant
   , script
-  , parseWastFile
+--  , parseWastFile
   ) where
 
 import           Control.Applicative
@@ -50,6 +50,7 @@ import           Text.Parsec hiding ((<|>), many, optional,
 import           Text.Parsec.Language (haskellDef)
 import           Text.Parsec.String
 import qualified Text.Parsec.Token as P
+import Wasm.Syntax.Types
 
 {-
 import           Wasm.Binary.Decode
@@ -75,9 +76,12 @@ class (Show (Value w), Eq (Value w)) => WasmEngine w m where
 
   decodeModule :: ByteString -> Either String (Module w)
 
-  initializeModule
-    :: Module w -> Map Text ModuleRef -> IntMap (ModuleInst w m)
-    -> m (Either String (ModuleRef, ModuleInst w m))
+  initializeModule ::
+      (Module f)
+     -> Map Text ModuleRef
+     -> IntMap (ModuleInst f m)
+     -> ((ModuleRef, ModuleInst f m) -> GenHS (m (Either String r)))
+     -> GenHS (m (Either String r))
 
   invokeByName
     :: IntMap (ModuleInst w m) -> ModuleInst w m -> Text
@@ -425,9 +429,9 @@ newCheckState names mods =
       , _checkStateNames   = names
       , _checkStateModules = mods
       }
-
+{-
 parseWastFile
-  :: forall w m. (Monad m, MonadBaseControl IO m, WasmEngine w m)
+  :: forall w m. (Monad m, MonadBaseControl IO m, WasmEngine w m, MonadFail m)
   => FilePath
   -> String
   -> Map Text ModuleRef
@@ -450,7 +454,7 @@ parseWastFile path input preNames preMods readModule assertEqual assertFailure =
             --   ++ sexp ++ "\n\n" ++ err
           Right (m :: Module w) -> do
             CheckState _ names mods <- get
-            eres <- lift $ initializeModule @w @m m names mods
+            eres <- undefined --lift $ initializeModule @w @m m names mods
             case eres of
               Left err ->
                 -- assertFailure $ "Error initializing module: " ++ show err
@@ -469,7 +473,7 @@ parseWastFile path input preNames preMods readModule assertEqual assertFailure =
             --   ++ sexp ++ "\n\n" ++ err
           Right m -> do
             CheckState _ names mods <- get
-            eres <- lift $ initializeModule @w @m m names mods
+            eres <- undefined --lift $ initializeModule @w @m m names mods
             case eres of
               Left err ->
                 fail $ "Error initializing module: " ++ show err
@@ -572,3 +576,4 @@ parseWastFile path input preNames preMods readModule assertEqual assertFailure =
         checkStateNames.at (Text.pack str) ?= ref'
 
       e -> fail $ "unexpected: " ++ show e
+      -}

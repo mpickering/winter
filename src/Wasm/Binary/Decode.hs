@@ -44,6 +44,7 @@ instance Decodable Phrase
 
 type SectionT = StateT [Custom]
 
+
 getList :: forall a . Int -> Get a -> Get [a]
 getList budget getValue = do
   n <- getULEB128 budget
@@ -237,7 +238,7 @@ getMemoryOp :: ValueType -> Maybe size -> Get (MemoryOp size)
 getMemoryOp valueType size = do
   alignment <- getULEB128 32
   if alignment > 32
-    then fail "getMemoryOp: invalid alignment: %d" alignment
+    then fail (printf "getMemoryOp: invalid alignment: %d" alignment)
     else do
       offset <- getULEB128 32
       return $ MemoryOp valueType alignment offset size

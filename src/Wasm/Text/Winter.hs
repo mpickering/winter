@@ -35,14 +35,17 @@ instance (MonadRef m, Monad m, Regioned f, Decode.Decodable f, Show1 f)
   const_f32 = Values.F32
   const_f64 = Values.F64
 
+{-
   decodeModule = Right . runGet Decode.getModule
   initializeModule m names mods =
     fmap (either (Left . show) Right)
       $ runExceptT $ Eval.initialize (m @@ def) names mods
-
+{-
+-}
   invokeByName mods inst name stack =
     fmap (either (Left . show) (Right . (,inst)))
       $ runExceptT $ Eval.invokeByName mods inst name stack
   getByName inst name  =
     fmap (either (Left . show) (Right . (,inst)))
       $ runExceptT $ Eval.getByName inst name
+      -}

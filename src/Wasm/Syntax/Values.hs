@@ -1,6 +1,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveLift #-}
 
 module Wasm.Syntax.Values where
 
@@ -10,13 +12,14 @@ import           Data.Int
 import           GHC.Generics
 
 import           Wasm.Syntax.Types
+import Language.Haskell.TH.Syntax
 
 data Value
   = I32 {-# UNPACK #-} !Int32
   | I64 {-# UNPACK #-} !Int64
   | F32 {-# UNPACK #-} !Float
   | F64 {-# UNPACK #-} !Double
-  deriving (Eq, Generic, NFData, Ord, Show)
+  deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 typeOf :: Value -> ValueType
 typeOf = \case

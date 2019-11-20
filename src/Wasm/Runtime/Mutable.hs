@@ -1,10 +1,12 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Wasm.Runtime.Mutable where
 
 import Data.IORef
+import Wasm.Syntax.Types
 
 class MonadRef m where
   data Mutable m a :: *
@@ -19,5 +21,5 @@ instance MonadRef IO where
 
   newMut    = fmap IOMutable . newIORef
   getMut    = readIORef . getIOMutable
-  setMut    = writeIORef . getIOMutable
-  modifyMut = modifyIORef . getIOMutable
+  setMut   m s = writeIORef (getIOMutable m) s
+  modifyMut m f= modifyIORef (getIOMutable m) f

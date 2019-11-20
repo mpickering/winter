@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveLift #-}
 
 module Wasm.Syntax.Types where
 
@@ -9,17 +10,38 @@ import           Control.DeepSeq
 import           Data.Int
 import           GHC.Generics
 import           Lens.Micro.Platform
+import Language.Haskell.TH
+import Language.Haskell.TH.Syntax
+import Control.Monad.Except
+
+newtype GenHS a = GenHS { runHS :: Q (TExp a) }
+
+--instance MonadError
+
+newtype GenHST m a = GenHST { runHST :: GenHS (m a) }
+
+genHS = GenHST . GenHS
+
+run = runHS . runHST
+
+data WQ a = WQ a (GenHS a)
+
+liftTy :: Lift a => a -> Q (TExp a)
+liftTy = unsafeTExpCoerce . Language.Haskell.TH.Syntax.lift
+
+getC (WQ _ c) = c
+getA (WQ a _) = a
 
 data ValueType
   = I32Type
   | I64Type
   | F32Type
   | F64Type
-  deriving (Eq, Generic, NFData, Ord, Show)
+  deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 data ElemType
   = AnyFuncType
-  deriving (Eq, Generic, NFData, Ord, Show)
+  deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 type StackType = [ValueType]
 
@@ -42,7 +64,7 @@ makeLenses ''Limits
 data Mutability
   = Immutable
   | Mutable
-  deriving (Eq, Generic, NFData, Ord, Show)
+  deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 data TableType
   = TableType
@@ -58,7 +80,7 @@ data GlobalType
   = GlobalType
   { _globalValueType :: ValueType
   , _globalMutability :: Mutability
-  } deriving (Eq, Generic, NFData, Ord, Show)
+  } deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 makeLenses ''GlobalType
 

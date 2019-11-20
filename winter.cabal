@@ -37,7 +37,8 @@ Library
     parsec,
     text,
     transformers,
-    vector
+    vector,
+    template-haskell
   Exposed-Modules:
     Wasm.Binary.Custom
     Wasm.Binary.Decode
@@ -46,6 +47,7 @@ Library
     Wasm.Binary.LEB128
     Wasm.Binary.Lift
     Wasm.Exec.Eval
+    Wasm.Exec.EvalTypes
     Wasm.Exec.EvalNumeric
     Wasm.Runtime.Mutable
     Wasm.Runtime.Func
@@ -81,9 +83,11 @@ Executable wasm-invoke
     winter,
     mtl,
     parsec,
-    text
+    text,
+    template-haskell
   HS-Source-Dirs:
     app
+  other-modules: StaticMain
   Main-Is:
     Main.hs
 
