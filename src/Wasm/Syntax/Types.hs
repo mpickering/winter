@@ -49,7 +49,7 @@ data FuncType
   = FuncType
   { _funcInput :: StackType
   , _funcOutput :: StackType
-  } deriving (Eq, Generic, NFData, Ord, Show)
+  } deriving (Eq, Generic, NFData, Ord, Show, Lift)
 
 makeLenses ''FuncType
 

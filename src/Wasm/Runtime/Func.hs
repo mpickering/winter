@@ -78,7 +78,9 @@ alloc :: FuncType -> a -> f (Func f) -> FuncInst f m a
 alloc = AstFunc
 
 data CompiledFunc = CompiledFunc { getComp :: GenHS ([Value] -> EvalTHS IO [Value]) }
-data RuntimeFunc = RuntimeFunc { runFunc :: [Value] -> EvalTHS IO [Value] }
+data RuntimeFunc = RuntimeFunc { funTy :: FuncType
+                               , runFunc :: [Value] -> EvalTHS IO [Value] }
+
 
 allocCompiled :: FuncType -> CompiledFunc -> FuncInst f m a
 allocCompiled = CompFunc

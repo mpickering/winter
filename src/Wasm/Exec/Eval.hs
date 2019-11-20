@@ -129,17 +129,18 @@ global inst = lookup "global" inst miGlobals
 elem :: (Regioned f)
      => ModuleInst f IO -> Var f -> GenHS Table.Index -> Region
      -> EvalT IO Func.RuntimeFunc
-elem inst x i at' = do
-  t <- table inst x
-  x <- lift $ Table.load t i
-  case x of
-    Nothing -> throwError $
-      EvalTrapError at' ("uninitialized element " ++ show i)
-    Just f -> pure f
+elem inst x i at' = genHS $ do
+  t <- throwTH $ table inst x
+  [|| do
+    x <- lift $ $$(runHS $ Table.load t i)
+    case x of
+      Nothing -> throwError $
+        EvalTrapError at' ("uninitialized element " ++ show $$(runHS i))
+      Just f -> pure f ||]
 
 funcElem :: (Regioned f)
-         => ModuleInst f m -> Var f -> Table.Index -> Region
-         -> EvalT m Func.RuntimeFunc
+         => ModuleInst f IO -> Var f -> GenHS Table.Index -> Region
+         -> EvalT IO Func.RuntimeFunc
 funcElem = elem
 {-# INLINE funcElem #-}
 
@@ -351,14 +352,19 @@ instr vs at e' k' cfg =
     f <- throwTH $ func inst x
     run $ k $ Code vs [Invoke f @@ at]
 
-  (CallIndirect x, vs) -> {-# SCC step_CallIndirect #-} do
+  (CallIndirect x, vs) -> {-# SCC step_CallIndirect #-}
     let inst = getFrameInst cfg
-    func <- lift $ funcElem inst (0 @@ at) i at
-    t <- lift $ type_ inst x
-    k $ Code vs $
-      if t /= Func.typeOf func
-      then [Trapping "indirect call type mismatch" @@ at]
-      else [Invoke func @@ at]
+    in genHS $ do
+    t <- throwTH $ type_ inst x
+    let runToComp :: GenHS Func.RuntimeFunc -> Func.CompiledFunc
+        runToComp rf = Func.CompiledFunc (GenHS [|| Func.runFunc $$(runHS rf) ||])
+    [||
+      case $$(runHS vs) of
+        I32 i : vs -> do
+          func <- $$(run $ funcElem inst (0 @@ at) (GenHS [|| i ||]) at)
+          if t /= Func.funTy func
+            then $$(run $ k $ Code (GenHS [|| vs ||]) [Trapping "indirect call type mismatch" @@ at])
+            else $$(run $ k $ Code (GenHS [|| vs ||]) [Invoke (Func.CompFunc t (runToComp (GenHS [|| func ||]))) @@ at]) ||]
 
   (Drop, vs) -> {-# SCC step_Drop #-}
     genHS $ [|| do
@@ -714,9 +720,9 @@ genFs fs = GenHS $ do
     unroll (f1:fss) =
       let lf = case f1 of
             Func.AstFunc {} -> error "genFS - astFunc"
-            Func.CompFunc ft (Func.CompiledFunc f) -> [|| (Func.RuntimeFunc $ $$(runHS f)) ||]
-            Func.HostFunc ft (WQ _ w) -> [|| Func.RuntimeFunc (return . $$(runHS w)) ||]
-            Func.HostFuncEff ft (WQ _ w) -> [|| Func.RuntimeFunc (lift . $$(runHS w)) ||]
+            Func.CompFunc ft (Func.CompiledFunc f) -> [|| (Func.RuntimeFunc ft $ $$(runHS f)) ||]
+            Func.HostFunc ft (WQ _ w) -> [|| Func.RuntimeFunc ft (return . $$(runHS w)) ||]
+            Func.HostFuncEff ft (WQ _ w) -> [|| Func.RuntimeFunc ft (lift . $$(runHS w)) ||]
       in
         [|| $$lf : $$(unroll fss) ||]
 
