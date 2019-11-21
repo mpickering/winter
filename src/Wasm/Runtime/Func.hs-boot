@@ -15,5 +15,7 @@ type role FuncInst nominal nominal representational
 
 data FuncInst (f :: * -> *) (m :: * -> *) (a :: *)
 
-data CompiledFunc
+type role CompiledFunc nominal
+
+data CompiledFunc (r :: *)
 

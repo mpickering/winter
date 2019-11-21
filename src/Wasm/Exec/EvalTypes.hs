@@ -111,12 +111,12 @@ instance Show (Frame f m) where
 
 makeLenses ''Frame
 
-data Code f m = Code
+data Code f m r = Code
   { _codeStack  :: !((Stack Value))
-  , _codeInstrs :: ![f (AdminInstr f m)]
+  , _codeInstrs :: ![f (AdminInstr f m r)]
   }
 
-instance (Regioned f, Show1 f) => Show (Code f m) where
+instance (Regioned f, Show1 f) => Show (Code f m r) where
   showsPrec d Code {..} =
     showParen (d > 10)
       $ showString "Code "
@@ -124,16 +124,16 @@ instance (Regioned f, Show1 f) => Show (Code f m) where
       . showString " "
       . showListWith (showsPrec1 11) _codeInstrs
 
-data AdminInstr f m
+data AdminInstr f m r
   = Plain !(Instr f)
   | Invoke !(Func.ModuleFunc f m)
   | Trapping !String
   | Returning !(Stack Value)
   | Breaking !Int !(Stack Value)
-  | Label !Int !(Func.CompiledFunc) !(Code f m)
-  | Framed !Int !(Frame f m) !(Code f m)
+  | Label !Int !(Func.CompiledFunc r) !(Code f m r)
+  | Framed !Int !(Frame f m) !(Code f m r)
 
-instance (Regioned f, Show1 f) => Show (AdminInstr f m) where
+instance (Regioned f, Show1 f) => Show (AdminInstr f m r) where
   showsPrec d = showParen (d > 10) . \case
     Plain p      -> showString "Plain "     . showsPrec 11 p
     Invoke i     -> showString "Invoke "    . showsPrec1 11 i

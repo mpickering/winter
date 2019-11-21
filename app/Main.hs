@@ -13,4 +13,3 @@ import StaticMain
 
 main = $$(staticMain (Options "init" "loop.wasm"))
 
-

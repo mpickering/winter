@@ -86,7 +86,7 @@ newConfig mods inst = Config
   , _configBudget  = 300
   }
 
-plain :: Regioned f => f (Instr f) -> f (AdminInstr f m)
+plain :: Regioned f => f (Instr f) -> f (AdminInstr f m r)
 plain e = Plain (value e) @@ region e
 {-# INLINE plain #-}
 
@@ -199,8 +199,8 @@ emptyStack :: Stack a
 emptyStack = GenHS [|| [] ||]
 
 step_work :: (Regioned f, Show1 f)
-          => Stack Value -> Region -> AdminInstr f IO
-          -> (Code f IO -> CEvalT f IO r)
+          => Stack Value -> Region -> AdminInstr f IO r
+          -> (Code f IO r -> CEvalT f IO r)
           -> CEvalT f IO r
 step_work vs at i k' cfg =
   let k c = k' c cfg
@@ -223,13 +223,15 @@ step_work vs at i k' cfg =
         k $ Code vs [Trapping msg @@ region t]
       Returning vs0 -> {-# SCC step_Label4 #-}
         k $ Code vs [Returning vs0 @@ region t]
-      Breaking 0 vs0 -> {-# SCC step_Label5 #-} genHS $ [|| do
-        abd <- $$(run $ takeFrom n vs0 at)
-        res <- (++) <$> $$(runHS $ cf) abd <*> pure $$(runHS vs)
-        $$(run $ k $ Code (GenHS [|| res ||]) [])
-        ||]
-      Breaking bk vs0 -> {-# SCC step_Label6 #-}
-        k $ Code vs [Breaking (bk - 1) vs0 @@ at]
+      Breaking 0 vs0 -> {-# SCC step_Label5 #-} genHS $ do
+        liftIO $ print ("found match", n)
+        [|| do
+          abd <- $$(run $ takeFrom n vs0 at)
+          $$(runHS $ cf) (abd ++ $$(runHS vs))
+          ||]
+      Breaking bk vs0 -> {-# SCC step_Label6 #-} genHS $ do
+        liftIO $ print ("Breaking", bk)
+        run $ k $ Code vs [Breaking (bk - 1) vs0 @@ at]
       _ -> {-# SCC step_Label7 #-} do
         step code' (\res ->
           k' $ Code vs [Label n es0 res @@ at]) cfg
@@ -313,13 +315,13 @@ step_work vs at i k' cfg =
         ||]) ||]
 
 {-# SPECIALIZE step_work
-      :: Stack Value -> Region -> AdminInstr Phrase IO
-      -> (Code Phrase IO -> CEvalT Phrase IO r)
+      :: Stack Value -> Region -> AdminInstr Phrase IO r
+      -> (Code Phrase IO r -> CEvalT Phrase IO r)
       -> CEvalT Phrase IO r #-}
 
 instr :: (Regioned f, Show1 f)
       => Stack Value -> Region -> Instr f
-      -> (Code f IO -> CEvalT f IO r)
+      -> (Code f IO r -> CEvalT f IO r)
       -> CEvalT f IO r
 instr vs at e' k' cfg =
   let k c = k' c cfg
@@ -330,16 +332,14 @@ instr vs at e' k' cfg =
     k $ Code vs []
   (Block ts es', vs)             -> genHS $ [||
 --    let jump vs = $$(run $ eval (Code (GenHS [|| vs ||]) []) cfg)
-    $$(run $ k $ Code vs [Label (length ts) (Func.CompiledFunc $ GenHS [|| \vs -> return vs ||]) (Code emptyStack (map plain es')) @@ at]) ||]
+    $$(run $ k $ Code vs [Label (length ts) (Func.CompiledFunc $ (GenHS $ [|| \vs -> $$(run $ k (Code (GenHS [|| vs ||]) [])) ||])) (Code emptyStack (map plain es')) @@ at]) ||]
   (Loop _ es', vs)               -> genHS $ [||
     let ll_loop l_vs = do
 --          lift $ print @[Value] l_vs
-          $$(run $ eval (Code (GenHS [|| l_vs ||]) [Label 0 (Func.CompiledFunc (GenHS [|| ll_loop ||])) (Code emptyStack (map plain es')) @@ at]) cfg)
+          $$(run $ k (Code (GenHS [|| l_vs ||]) [Label 0 (Func.CompiledFunc (GenHS [|| ll_loop ||])) (Code emptyStack (map plain es')) @@ at]))
     in do
 --        lift $ print @[Value] $$(runHS vs)
-        res <- ll_loop $$(runHS vs)
-
-        $$(run $ k $ Code (GenHS [|| res ||]) []) ||]
+        ll_loop $$(runHS vs) ||]
   (If ts es1 es2, vs') -> genHS $ [|| do
     case $$(runHS vs) of
       I32 0 : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Block ts es2)) @@ at])
@@ -350,7 +350,7 @@ instr vs at e' k' cfg =
   (BrIf x, vs)          -> {-# SCC step_BrIf1 #-} genHS $ [|| do
     case $$(runHS vs) of
       I32 0 : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [])
-      I32 i : vs' -> --lift (print i) >>
+      I32 i : vs' -> lift (print i) >>
                       $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Br x)) @@ at]) ||]
   (BrTable xs x, v) -> genHS $ [|| do
     case $$(runHS vs) of
@@ -371,7 +371,7 @@ instr vs at e' k' cfg =
     let inst = getFrameInst cfg
     in genHS $ do
     t <- throwTH $ type_ inst x
-    let runToComp :: GenHS Func.RuntimeFunc -> Func.CompiledFunc
+    let runToComp :: GenHS Func.RuntimeFunc -> Func.CompiledFunc [Value]
         runToComp rf = Func.CompiledFunc (GenHS [|| Func.runFunc $$(runHS rf) ||])
     [||
       case $$(runHS vs) of
@@ -578,11 +578,11 @@ showTys = show
 
 {-# SPECIALIZE instr
       :: Stack Value -> Region -> Instr Phrase
-      -> (Code Phrase IO -> CEvalT Phrase IO r)
+      -> (Code Phrase IO r -> CEvalT Phrase IO r)
       -> CEvalT Phrase IO r #-}
 
 step :: (Regioned f,  Show1 f)
-     => Code f IO -> (Code f IO -> CEvalT f IO r) -> CEvalT f IO r
+     => Code f IO r -> (Code f IO r -> CEvalT f IO r) -> CEvalT f IO r
 step (Code _ []) _ _ = error "Cannot step without instructions"
 step (Code vs (e:es)) k cfg =
   genHS $ do
@@ -590,11 +590,11 @@ step (Code vs (e:es)) k cfg =
     run $ step_work vs (region e) (value e) (k . (codeInstrs <>~ es)) cfg
 
 {-# SPECIALIZE step
-      :: Code Phrase IO -> (Code Phrase IO -> CEvalT Phrase IO r)
+      :: Code Phrase IO r -> (Code Phrase IO r -> CEvalT Phrase IO r)
       -> CEvalT Phrase IO r #-}
 
 eval :: (Regioned f, Show1 f)
-     => Code f IO -> CEvalT f IO ([Value])
+     => Code f IO [Value] -> CEvalT f IO ([Value])
 eval c@(Code vs es) cfg = case es of
   [] -> genHS [|| pure $$(runHS vs) ||]
   t@(value -> Trapping msg) : _ ->
@@ -690,14 +690,16 @@ createFunc inst ref f k = do
   let FuncType ins outs = ty
   pure $ createVars ins (\arg_vs ->
     createVars (value f^.funcLocals) (\local_vs -> GenHS $ do
-    let fbody = [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
-        cfg = Config (Frame inst (arg_vs ++ local_vs)) 300
+    let fun_body = [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
+        frame' = (Frame inst (arg_vs ++ local_vs))
+        frame_body = [Framed (length outs) frame' (Code emptyStack fun_body) @@ region f]
+        cfg = Config frame' 300
         compiled_func = GenHS [|| \vs -> do
           -- Set arg vars to passed arguments
           $$(run $ setArgs arg_vs (GenHS [|| vs ||]))
           -- Reset local variables to default values
           $$(run $ setLocals (zip (map defaultValue (value f^.funcLocals)) local_vs))
-          $$(run $ eval (Code (GenHS [|| vs ||]) fbody) cfg)
+          $$(run $ eval (Code (GenHS [|| vs ||]) frame_body) cfg)
           ||]
 
     join $ fmap runHS $ throwTH $ k $ Func.allocCompiled ty (Func.CompiledFunc compiled_func)

@@ -16,7 +16,7 @@ import Wasm.Exec.EvalTypes
 
 data FuncInst f m a
   = AstFunc FuncType a (f (Func f))
-  | CompFunc FuncType CompiledFunc
+  | CompFunc FuncType (CompiledFunc [Value])
   | HostFunc FuncType (WQ ([Value] -> [Value]))
   | HostFuncEff FuncType (WQ ([Value] -> m [Value]))
   deriving (Functor, Foldable, Traversable)
@@ -79,12 +79,12 @@ instance (Regioned f, Show1 f) => Show1 (FuncInst f m) where
 alloc :: FuncType -> a -> f (Func f) -> FuncInst f m a
 alloc = AstFunc
 
-data CompiledFunc = CompiledFunc { getComp :: !(GenHS ([Value] -> EvalTHS IO [Value])) }
+data CompiledFunc r = CompiledFunc { getComp :: !(GenHS ([Value] -> EvalTHS IO r)) }
 data RuntimeFunc = RuntimeFunc { funTy :: FuncType
                                , runFunc :: [Value] -> EvalTHS IO [Value] }
 
 
-allocCompiled :: FuncType -> CompiledFunc -> FuncInst f m a
+allocCompiled :: FuncType -> CompiledFunc [Value] -> FuncInst f m a
 allocCompiled = CompFunc
 
 allocHost :: FuncType -> WQ ([Value] -> [Value]) -> FuncInst f m a
