@@ -31,7 +31,7 @@ data Extern f m
   = ExternFunc ((ModuleFunc f m))
   | ExternTable (((TableInst m (RuntimeFunc))))
   | ExternMemory (((Memory.MemoryInst m)))
-  | ExternGlobal ((Global.GlobalInst m))
+  | ExternGlobal (GenHS (Global.GlobalInst m))
 
 _ExternFunc :: Traversal' (Extern f m) ((ModuleFunc f m))
 _ExternFunc f (ExternFunc x) = ExternFunc <$> f x
@@ -45,7 +45,7 @@ _ExternMemory :: Traversal' (Extern f m) ((Memory.MemoryInst m))
 _ExternMemory f (ExternMemory x) = ExternMemory <$> f x
 _ExternMemory _ x = pure x
 
-_ExternGlobal :: Traversal' (Extern f m) ((Global.GlobalInst m))
+_ExternGlobal :: Traversal' (Extern f m) (GenHS (Global.GlobalInst m))
 _ExternGlobal f (ExternGlobal x) = ExternGlobal <$> f x
 _ExternGlobal _ x = pure x
 
@@ -54,7 +54,7 @@ data ModuleInst f m = ModuleInst
   , _miFuncs    :: [(ModuleFunc f m)]
   , _miTables   :: [(TableInst m (RuntimeFunc))]
   , _miMemories :: [(MemoryInst m)]
-  , _miGlobals  :: [(GlobalInst m)]
+  , _miGlobals  :: [GenHS (GlobalInst m)]
   , _miExports  :: ExportInst f m
   }
 

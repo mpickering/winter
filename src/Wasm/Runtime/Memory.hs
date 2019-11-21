@@ -32,7 +32,7 @@ import Language.Haskell.TH (reportError)
 import Language.Haskell.TH.Syntax (unsafeTExpCoerce)
 
 data MemoryInst m = MemoryInst
-  { _miContent :: GenHS (Mutable m (Vector Word8))
+  { _miContent :: GenHS (Mutable m (MVector Word8))
   , _miMax :: Maybe Size
   }
 

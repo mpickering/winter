@@ -100,7 +100,7 @@ type Stack a = GenHS [a]
 
 data Frame f m = Frame
   { _frameInst :: !(ModuleInst f m)
-  , _frameLocals :: GenHS [Mutable m Value]
+  , _frameLocals :: [GenHS (Mutable m Value)]
   }
 
 instance Show (Frame f m) where
@@ -130,21 +130,21 @@ data AdminInstr f m
   | Trapping !String
   | Returning !(Stack Value)
   | Breaking !Int !(Stack Value)
-  | Label !Int ![f (Instr f)] !(Code f m)
+  | Label !Int !(Func.CompiledFunc) !(Code f m)
   | Framed !Int !(Frame f m) !(Code f m)
 
 instance (Regioned f, Show1 f) => Show (AdminInstr f m) where
   showsPrec d = showParen (d > 10) . \case
     Plain p      -> showString "Plain "     . showsPrec 11 p
---    Invoke i     -> showString "Invoke "    . showsPrec1 11 i
+    Invoke i     -> showString "Invoke "    . showsPrec1 11 i
     Trapping t   -> showString "Trapping "  . showsPrec1 11 t
-    --Returning r  -> showString "Returning " . showsPrec1 11 r
+    Returning r  -> showString "Returning " . showString "code"
     Breaking i s -> showString "Breaking "  . showsPrec 11 i
                                            . showString " "
    --                                        . showsPrec1 11 s
     Label i l c  -> showString "Label "     . showsPrec 11 i
                                            . showString " "
-                                           . showListWith (showsPrec1 11) l
+                                           -- . showListWith (showsPrec1 11) l
                                            . showString " "
                                            . showsPrec 11 c
     Framed i f c -> showString "Framed "    . showsPrec 11 i
@@ -155,8 +155,7 @@ instance (Regioned f, Show1 f) => Show (AdminInstr f m) where
 makeLenses ''Code
 
 data Config f m = Config
-  { _configModules :: !(IntMap (ModuleInst f m))
-  , _configFrame   :: !(Frame f m)
+  { _configFrame   :: !(Frame f m)
   , _configBudget  :: !Int                {- to model stack overflow -}
   }
 

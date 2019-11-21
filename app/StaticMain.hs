@@ -8,7 +8,7 @@ module StaticMain where
 
 import Control.Applicative           ((<|>))
 import Control.Monad                 (void)
-import Control.Monad.Except          (runExceptT)
+import Control.Monad.Except          (runExceptT, liftIO )
 import Data.Binary.Get               (runGet)
 import Data.Default.Class            (Default (..))
 import Data.Functor.Identity         (Identity (..))
@@ -31,6 +31,7 @@ import Wasm.Syntax.AST       ()
 import Wasm.Syntax.Types     (FuncType (..), ValueType (..), GenHS(..), WQ(..), genHS, run, GenHST(..))
 import Wasm.Syntax.Values    (Value (..))
 
+
 data Options
   = Options
   { func :: String
@@ -40,6 +41,7 @@ data Options
 instance Default Options where
   def = Options "sum" "sum.wasm"
 
+{-# NOINLINE parseValues #-}
 parseValues :: Parser [Value]
 parseValues = do
   value <- parseValue
@@ -133,8 +135,10 @@ staticMain Options{..} =  do
                 mods  = IntMap.singleton 1 app
                 name = pack func
             initialize ast names mods (\(ref, inst) -> GenHS $ do
+              liftIO $ print "init"
               GenHST (GenHS act) <- throwTH $ invokeByName (IntMap.insert ref inst mods) inst name vs
               act )
+      qAddDependentFile wasm
 
       [|| do
             args <- getArgs

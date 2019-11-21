@@ -46,6 +46,7 @@ instance (Regioned f, Show1 f, Show a) => Show (FuncInst f m a) where
         . showsPrec 11 a
         . showString " "
         . showsPrec1 11 f
+    CompFunc ft _ -> showParen (d > 10) $ showString "CompiledFunc " . showsPrec 11 ft
     HostFunc ty _f ->
       showParen (d > 10)
         $ showString "HostFunc "
@@ -65,6 +66,7 @@ instance (Regioned f, Show1 f) => Show1 (FuncInst f m) where
         . h 11 a
         . showString " "
         . showsPrec1 11 f
+    CompFunc ft _ -> showParen (d > 10) $ showString "CompiledFunc " . showsPrec 11 ft
     HostFunc ty _f ->
       showParen (d > 10)
         $ showString "HostFunc "
@@ -77,7 +79,7 @@ instance (Regioned f, Show1 f) => Show1 (FuncInst f m) where
 alloc :: FuncType -> a -> f (Func f) -> FuncInst f m a
 alloc = AstFunc
 
-data CompiledFunc = CompiledFunc { getComp :: GenHS ([Value] -> EvalTHS IO [Value]) }
+data CompiledFunc = CompiledFunc { getComp :: !(GenHS ([Value] -> EvalTHS IO [Value])) }
 data RuntimeFunc = RuntimeFunc { funTy :: FuncType
                                , runFunc :: [Value] -> EvalTHS IO [Value] }
 

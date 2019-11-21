@@ -16,7 +16,7 @@ Build-Type:    Simple
 Common generic
   default-language: Haskell2010
   build-depends:    base >=4.10 && <5,
-  ghc-options:      -O2 -Wall -Wredundant-constraints
+  ghc-options:      -O2 -Wall -Wredundant-constraints -g3 -debug
 
 Library
   Import: generic

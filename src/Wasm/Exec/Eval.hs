@@ -17,6 +17,7 @@
 
 module Wasm.Exec.Eval where
 
+import Debug.Trace
 import           Control.Exception
 import           Control.Monad
 import           Control.Monad.Except
@@ -65,20 +66,23 @@ import qualified Language.Haskell.TH.Syntax as TH
 
 
 -- Compile time only
+--
+{-
 getInst :: Monad m => ModuleRef -> Config f m -> ModuleInst f m
 getInst ref cfg =
   let mres = view (configModules.at ref) cfg
   in case mres of
     Nothing -> error $  "Reference to unknown module #" ++ show ref
     Just x  -> x
+    -}
 
 getFrameInst :: Monad m => Config f m -> ModuleInst f m
 getFrameInst = view (configFrame.frameInst)
 
 newConfig :: IntMap (ModuleInst f m) -> ModuleInst f m -> Config f m
 newConfig mods inst = Config
-  { _configModules = mods
-  , _configFrame   = Frame inst (GenHS [|| [] ||])
+  {
+    _configFrame   = Frame inst []
   , _configBudget  = 300
   }
 
@@ -119,12 +123,12 @@ memory :: (Regioned f, Monad m)
 memory inst = lookup "memory" inst miMemories
 
 global :: (Regioned f, Monad m)
-       => ModuleInst f m -> Var f -> EvalTHS m ((Global.GlobalInst m))
+       => ModuleInst f m -> Var f -> EvalTHS m (GenHS (Global.GlobalInst m))
 global inst = lookup "global" inst miGlobals
 
---local :: (Regioned f, Monad m)
---      => Frame f m -> Var f -> EvalTHS m (Mutable m Value)
---local frame = lookup "local" frame frameLocals
+local :: (Regioned f)
+      => Frame f IO -> Var f -> EvalTHS IO (GenHS (Mutable IO Value))
+local frame = lookup "local" frame frameLocals
 
 elem :: (Regioned f)
      => ModuleInst f IO -> Var f -> GenHS Table.Index -> Region
@@ -213,7 +217,7 @@ step_work vs at i k' cfg =
 
   Label _ _ (Code vs' []) -> {-# SCC step_Label1 #-}
     k $ Code (appStack vs' vs) []
-  Label n es0 code'@(Code _ (t@(value -> c) : _)) -> {-# SCC step_Label2 #-}
+  Label n es0@(Func.CompiledFunc cf) code'@(Code _ (t@(value -> c) : _)) -> {-# SCC step_Label2 #-}
     case c of
       Trapping msg -> {-# SCC step_Label3 #-}
         k $ Code vs [Trapping msg @@ region t]
@@ -221,7 +225,8 @@ step_work vs at i k' cfg =
         k $ Code vs [Returning vs0 @@ region t]
       Breaking 0 vs0 -> {-# SCC step_Label5 #-} genHS $ [|| do
         abd <- $$(run $ takeFrom n vs0 at)
-        $$(run $ k $ Code (appStack (GenHS [|| abd ||]) vs0) (map plain es0))
+        res <- (++) <$> $$(runHS $ cf) abd <*> pure $$(runHS vs)
+        $$(run $ k $ Code (GenHS [|| res ||]) [])
         ||]
       Breaking bk vs0 -> {-# SCC step_Label6 #-}
         k $ Code vs [Breaking (bk - 1) vs0 @@ at]
@@ -269,6 +274,7 @@ step_work vs at i k' cfg =
     checkTypes at ins args
 
     $$(run $ case func of
+      {-
       Func.AstFunc _ ref f -> genHS [|| do
         locals' <- lift $ traverse newMut $
           args ++ $$(TH.unsafeTExpCoerce $ TH.lift $ map defaultValue (value f^.funcLocals))
@@ -277,7 +283,7 @@ step_work vs at i k' cfg =
                code' = Code emptyStack [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
                frame' = Frame inst' (GenHS $ [|| locals' ||])
            in run $ k $ Code (GenHS [|| vs' ||]) [Framed (length outs) frame' code' @@ at])
-        ||]
+        ||] -}
 
       Func.CompFunc _ (Func.CompiledFunc f) -> genHS [|| do
         res <- reverse <$> $$(runHS $ f) args
@@ -311,7 +317,7 @@ step_work vs at i k' cfg =
       -> (Code Phrase IO -> CEvalT Phrase IO r)
       -> CEvalT Phrase IO r #-}
 
-instr :: (Regioned f) {-Show1 f,-}
+instr :: (Regioned f, Show1 f)
       => Stack Value -> Region -> Instr f
       -> (Code f IO -> CEvalT f IO r)
       -> CEvalT f IO r
@@ -322,10 +328,18 @@ instr vs at e' k' cfg =
     k $ Code vs [Trapping "unreachable executed" @@ at]
   (Nop, vs)                      -> {-# SCC step_Nop #-}
     k $ Code vs []
-  (Block ts es', vs)             -> {-# SCC step_Block #-}
-    k $ Code vs [Label (length ts) [] (Code emptyStack (map plain es')) @@ at]
-  (Loop _ es', vs)               -> {-# SCC step_Loop #-}
-    k $ Code vs [Label 0 [e' @@ at] (Code emptyStack (map plain es')) @@ at]
+  (Block ts es', vs)             -> genHS $ [||
+--    let jump vs = $$(run $ eval (Code (GenHS [|| vs ||]) []) cfg)
+    $$(run $ k $ Code vs [Label (length ts) (Func.CompiledFunc $ GenHS [|| \vs -> return vs ||]) (Code emptyStack (map plain es')) @@ at]) ||]
+  (Loop _ es', vs)               -> genHS $ [||
+    let ll_loop l_vs = do
+          lift $ print @[Value] l_vs
+          $$(run $ eval (Code (GenHS [|| l_vs ||]) [Label 0 (Func.CompiledFunc (GenHS [|| ll_loop ||])) (Code emptyStack (map plain es')) @@ at]) cfg)
+    in do
+        lift $ print @[Value] $$(runHS vs)
+        res <- ll_loop $$(runHS vs)
+
+        $$(run $ k $ Code (GenHS [|| res ||]) []) ||]
   (If ts es1 es2, vs') -> genHS $ [|| do
     case $$(runHS vs) of
       I32 0 : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Block ts es2)) @@ at])
@@ -336,7 +350,7 @@ instr vs at e' k' cfg =
   (BrIf x, vs)          -> {-# SCC step_BrIf1 #-} genHS $ [|| do
     case $$(runHS vs) of
       I32 0 : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [])
-      I32 _ : vs' -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Br x)) @@ at]) ||]
+      I32 i : vs' -> lift (print i) >> $$(run $ k $ Code (GenHS [|| vs' ||]) [Plain (Fix (Br x)) @@ at]) ||]
   (BrTable xs x, v) -> genHS $ [|| do
     case $$(runHS vs) of
       (I32 i) : vs' | i < 0 || fromIntegral i >= $$(liftTy $ length xs)  ->
@@ -377,58 +391,59 @@ instr vs at e' k' cfg =
         (I32 0 : v2 : _ : vs') -> $$(run $ k $ Code (GenHS ([|| v2 : vs' ||])) [])
         (I32 _ : _ : v1 : vs') -> $$(run $ k $ Code (GenHS ([|| (v1 : vs') ||])) []) ||]
 
-  (GetLocal x, vs) -> {-# SCC step_GetLocal #-}
-    undefined
-    {-
-    frame <- view configFrame
-    mut <- lift $ local frame x
-    l <- lift $ lift $ getMut mut
-    k $ Code (l : vs) []
-    -}
+  (GetLocal x, vs) -> genHS $ do
+    let frame  = _configFrame cfg
+    mut <- throwTH $ local frame x
+    [|| do
+      l <- lift $ getMut $$(runHS mut)
+      let s' = l : $$(runHS vs)
+      $$(run $ k $ Code (GenHS [|| s' ||]) []) ||]
 
-  (SetLocal x, vs ) -> --v : vs') -> {-# SCC step_SetLocal #-} do
-    undefined
-    {-
-    frame <- view configFrame
-    mut <- lift $ local frame x
-    lift $ lift $ setMut mut v
-    k $ Code vs' []
-    -}
+  (SetLocal x, vs ) -> genHS $ do --v : vs') -> {-# SCC step_SetLocal #-} do
+    let frame = _configFrame cfg
+    mut <- throwTH $ local frame x
+    [|| case $$(runHS vs) of
+          v : vs' -> do
+            lift $ print ("SetMut", v)
+            lift $ setMut $$(runHS mut) v
+            $$(run $ k $ Code (GenHS [|| vs' ||]) [] ) ||]
 
   (TeeLocal x, vs ) --v : vs') -> {-# SCC step_TeeLocal #-} do
-    -> undefined
-    {-
-    frame <- view configFrame
-    mut <- lift $ local frame x
-    lift $ lift $ setMut mut v
-    k $ Code (v : vs') []
-    -}
+    -> genHS $ do
+    let frame = _configFrame cfg
+    mut <- throwTH $ local frame x
+    [|| case $$(runHS vs) of
+          v : _ -> do
+            lift $ print ("TeeMut", v)
+            lift $ setMut $$(runHS mut) v
+            let s' = v : $$(runHS vs)
+            $$(run $ k $ Code (GenHS [|| s' ||]) []) ||]
 
-  (GetGlobal x, vs) -> {-# SCC step_GetGlobal #-}
+  (GetGlobal x, vs) -> {-# SCC step_GetGlobal #-} genHS $ do
     let inst = getFrameInst cfg
-        glb_var = global inst x
-    in genHS $ undefined {- --[|| do
-      g <- lift . Global.load
-      -- traceM $ "GetGlobal " ++ show (value x) ++ " = " ++ show g
-      $$(k $ Code [||(g : vs) ||] []) ||]
-      -}
+    glb_var <- throwTH $ global inst x
+    [|| do
+      g <- lift (Global.load $$(runHS glb_var))
+      $$(run $ k $ Code (GenHS [|| g : $$(runHS vs) ||]) []) ||]
 
-  (SetGlobal x, vs) -> --v : vs') -> {-# SCC step_SetGlobal #-} do
-    undefined
-    {-
-    inst <- getFrameInst
-    g <- lift $ global inst x
-    eres <- lift $ lift $ runExceptT $ Global.store g v
-    case eres of
-      Right () -> k $ Code vs' []
-      Left err -> throwError $ EvalCrashError at $ case err of
-        Global.GlobalNotMutable -> "write to immutable global"
-        Global.GlobalTypeError  -> "type mismatch at global write"
-        -}
+  (SetGlobal x, vs) -> genHS $ do --v : vs') -> {-# SCC step_SetGlobal #-} do
+
+    let inst = getFrameInst cfg
+    glb_var <- throwTH $ global inst x
+    [|| do
+      case $$(runHS vs) of
+        v : vs' -> do
+          eres <- lift $ runExceptT $ Global.store $$(runHS glb_var) v
+          case eres of
+            Right () -> $$(run $ k $ Code (GenHS [|| vs' ||]) [])
+            Left err -> throwError $ EvalCrashError at $ case err of
+              Global.GlobalNotMutable -> "write to immutable global"
+              Global.GlobalTypeError  -> "type mismatch at global write" ||]
 
   (Load op, vs) -> {-# SCC step_Load #-} genHS $ do
     let inst = getFrameInst cfg
-    mem <- undefined $ memory inst (0 @@ at)
+    --liftIO $ print (length (_miMemories inst))
+    mem <- throwTH $ memory inst (0 @@ at)
     let off :: Int32
         off = fromIntegral (op^.memoryOffset)
         ty = op^.memoryValueType
@@ -440,95 +455,118 @@ instr vs at e' k' cfg =
               Nothing        -> [|| $$(runHS $ Memory.loadValue mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS $ liftTy ty)) ||]
               Just (sz, ext) -> [|| $$(runHS $ Memory.loadPacked sz ext mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS $ liftTy ty)) ||])
             case eres of
-              Right v' -> $$(run $ k (Code (GenHS [|| v' : vs' ||]) []))
-              Left exn -> $$(run $ k (Code (GenHS [|| vs' ||]) [Trapping (memoryErrorString undefined) @@ at])) ||]
+              Right v' -> do
+                lift $ print ("loaded", i)
+                $$(run $ k (Code (GenHS [|| v' : vs' ||]) []))
+              Left exn -> $$(run $ k (Code (GenHS [|| vs' ||]) [Trapping "mem err" @@ at])) ||]
 
-{-
-  (Store op, v : I32 i : vs') -> {-# SCC step_Store #-} do
-    inst <- getFrameInst
-    mem <- lift $ memory inst (0 @@ at)
-    let addr = fromIntegral $ i64_extend_u_i32 (fromIntegral i)
-    let off = fromIntegral (op^.memoryOffset)
-    eres <- lift $ lift $ runExceptT $ case op^.memorySize of
-          Nothing -> Memory.storeValue mem addr off v
-          Just sz -> Memory.storePacked sz mem addr off v
-    case eres of
-      Right () -> k $ Code vs' []
-      Left exn ->
-        k $ Code vs' [Trapping (memoryErrorString exn) @@ at]
-
-  (MemorySize, vs) -> {-# SCC step_MemorySize #-} do
+  (Store op, vs) -> {-# SCC step_Store #-} genHS $ do
     let inst = getFrameInst cfg
-    mem  <- memory inst (0 @@ at)
-    sz   <- lift $ Memory.size mem
-    k $ Code (I32 sz : vs) []
+    --liftIO $ print (length (_miMemories inst))
+    mem <- throwTH $ memory inst (0 @@ at)
+    let off = fromIntegral (op^.memoryOffset)
 
-  (MemoryGrow, I32 delta : vs') -> {-# SCC step_MemoryGrow #-} do
-    inst    <- getFrameInst
-    mem     <- lift $ memory inst (0 @@ at)
-    oldSize <- lift $ lift $ Memory.size mem
-    eres    <- lift $ lift $ runExceptT $ Memory.grow mem delta
-    let result = case eres of
-            Left _   -> -1
-            Right () -> oldSize
-    k $ Code (I32 result : vs') []
+    [|| case $$(runHS vs) of
+          v : I32 i : vs' ->  do
+            let addr = fromIntegral $ i64_extend_u_i32 (fromIntegral i)
+            eres <- lift $ runExceptT $ $$(case op^.memorySize of
+              Nothing -> runHS $ Memory.storeValue mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS [|| v ||])
+              Just sz -> runHS $ Memory.storePacked sz mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS [|| v ||]) )
+            case eres of
+              Right () -> $$(run $ k $ Code (GenHS [|| vs' ||]) [])
+              Left exn -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping "foo" @@ at]) ||]
+  (MemorySize, vs) -> {-# SCC step_MemorySize #-} genHS $ do
+    let inst = getFrameInst cfg
+
+    --liftIO $ print (length (_miMemories inst))
+    mem  <- throwTH $ memory inst (0 @@ at)
+    [|| do
+      sz   <- lift $ $$(runHS $ Memory.size mem)
+      $$(run $ k $ Code (GenHS [|| (I32 sz : $$(runHS vs)) ||]) []) ||]
+
+  (MemoryGrow, vs) -> {-# SCC step_MemoryGrow #-} genHS $ do
+    let inst    = getFrameInst cfg
+    --liftIO $ print (length (_miMemories inst))
+    mem     <- throwTH $ memory inst (0 @@ at)
+    [|| case $$(runHS vs) of
+          (I32 delta : vs') -> do
+              oldSize <- lift $ $$(runHS $ Memory.size mem)
+              eres    <- lift $ runExceptT $ $$(runHS $ Memory.grow mem (GenHS [|| delta ||]))
+              let result = case eres of
+                    Left _   -> -1
+                    Right () -> oldSize
+              $$(run $ k $ Code ((GenHS [|| I32 result  : vs' ||])) []) ||]
 
   (Const v, vs) -> {-# SCC step_Const #-}
-    k $ Code (value v : vs) []
+    k $ Code (GenHS [|| $$(liftTy $ value v) : $$(runHS vs) ||]) []
 
-  (Test testop, v : vs') -> {-# SCC step_Test #-} do
-    let eres = case testop of
-          I32TestOp o -> testOp @Int32 intTestOp o v
-          I64TestOp o -> testOp @Int64 intTestOp o v
-    k $ case eres of
-      Left err -> Code vs' [Trapping (show err) @@ at]
-      Right v' -> Code (v' : vs') []
+  (Test testop, vs) -> {-# SCC step_Test #-} genHS $ do
+    [|| case $$(runHS vs) of
+          v : vs' -> do
+            let eres = $$(case testop of
+                  -- todo, remove branching as testop is static
+                  I32TestOp o -> [|| testOp @Int32 intTestOp o v ||]
+                  I64TestOp o -> [|| testOp @Int64 intTestOp o v ||])
+            case eres of
+              Left err -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping "test" @@ at])
+              Right v' -> $$(run $ k $ Code (GenHS [|| (v' : vs') ||]) []) ||]
 
-  (Compare relop, v2 : v1 : vs') -> {-# SCC step_Compare #-} do
-    let eres = case relop of
-          I32CompareOp o -> compareOp @Int32 intRelOp o v1 v2
-          I64CompareOp o -> compareOp @Int64 intRelOp o v1 v2
-          F32CompareOp o -> compareOp @Float floatRelOp o v1 v2
-          F64CompareOp o -> compareOp @Double floatRelOp o v1 v2
-    k $ case eres of
-      Left err -> Code vs' [Trapping (show err) @@ at]
-      Right v' -> Code (v' : vs') []
+  (Compare relop, vs) -> {-# SCC step_Compare #-} genHS $
+    [|| case $$(runHS vs) of
+          v2 : v1 : vs' -> do
+            let eres = $$(case relop of
+                  I32CompareOp o -> [|| compareOp @Int32 intRelOp o v1 v2 ||]
+                  I64CompareOp o -> [|| compareOp @Int64 intRelOp o v1 v2 ||]
+                  F32CompareOp o -> [|| compareOp @Float floatRelOp o v1 v2 ||]
+                  F64CompareOp o -> [|| compareOp @Double floatRelOp o v1 v2 ||])
+            case eres of
+              Left err -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping "compare" @@ at])
+              Right v' -> $$(run $ k $ Code (GenHS [|| (v' : vs') ||]) []) ||]
 
-  (Unary unop, v : vs') -> {-# SCC step_Unary #-} do
-    let eres = case unop of
-          I32UnaryOp o -> unaryOp @Int32 intUnOp o v
-          I64UnaryOp o -> unaryOp @Int64 intUnOp o v
-          F32UnaryOp o -> unaryOp @Float floatUnOp o v
-          F64UnaryOp o -> unaryOp @Double floatUnOp o v
-    k $ case eres of
-      Left err -> Code vs' [Trapping (show err) @@ at]
-      Right v' -> Code (v' : vs') []
+  (Unary unop, vs) -> {-# SCC step_Unary #-} genHS $ do
+    [|| case $$(runHS vs) of
+          v : vs' -> do
+            let eres = $$(case unop of
+                  I32UnaryOp o -> [|| unaryOp @Int32 intUnOp o v ||]
+                  I64UnaryOp o -> [|| unaryOp @Int64 intUnOp o v ||]
+                  F32UnaryOp o -> [|| unaryOp @Float floatUnOp o v ||]
+                  F64UnaryOp o -> [|| unaryOp @Double floatUnOp o v ||])
+            case eres of
+              Left err -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping (show "un") @@ at])
+              Right v' -> $$(run $ k $ Code (GenHS [|| (v' : vs') ||]) []) ||]
 
-  (Binary binop, v2 : v1 : vs') -> {-# SCC step_Binary #-} do
-    let eres = case binop of
-          I32BinaryOp o -> binaryOp @Int32 intBinOp o v1 v2
-          I64BinaryOp o -> binaryOp @Int64 intBinOp o v1 v2
-          F32BinaryOp o -> binaryOp @Float floatBinOp o v1 v2
-          F64BinaryOp o -> binaryOp @Double floatBinOp o v1 v2
-    k $ case eres of
-      Left err -> Code vs' [Trapping (show err) @@ at]
-      Right v' -> Code (v' : vs') []
+  (Binary binop, vs) -> {-# SCC step_Binary #-} genHS $
+    [|| case $$(runHS vs) of
+          v2 : v1 : vs' -> do
+              let eres = $$(case binop of
+                    I32BinaryOp o -> [|| binaryOp @Int32 intBinOp o v1 v2 ||]
+                    I64BinaryOp o -> [|| binaryOp @Int64 intBinOp o v1 v2 ||]
+                    F32BinaryOp o -> [|| binaryOp @Float floatBinOp o v1 v2 ||]
+                    F64BinaryOp o -> [|| binaryOp @Double floatBinOp o v1 v2 ||])
+              case eres of
+                Left err -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping "bin" @@ at])
+                Right v' -> $$(run $ k $ Code (GenHS [|| (v' : vs') ||]) []) ||]
 
-  (Convert cvtop, v : vs') -> {-# SCC step_Convert #-} do
-    let eres = case cvtop of
-          I32ConvertOp o -> intCvtOp @Int32 o v
-          I64ConvertOp o -> intCvtOp @Int64 o v
-          F32ConvertOp o -> floatCvtOp @Float o v
-          F64ConvertOp o -> floatCvtOp @Double o v
-    k $ case eres of
-      Left err -> Code vs' [Trapping (show err) @@ at]
-      Right v' -> Code (v' : vs') []
+  (Convert cvtop, vs) -> {-# SCC step_Convert #-} genHS $ do
+    [|| case $$(runHS vs) of
+          v : vs' -> do
+            let eres = $$(case cvtop of
+                  I32ConvertOp o -> [|| intCvtOp @Int32 o v ||]
+                  I64ConvertOp o -> [|| intCvtOp @Int64 o v ||]
+                  F32ConvertOp o -> [|| floatCvtOp @Float o v ||]
+                  F64ConvertOp o -> [|| floatCvtOp @Double o v ||])
+            case eres of
+              Left err -> $$(run $ k $ Code (GenHS [|| vs' ||]) [Trapping "err" @@ at])
+              Right v' -> $$(run $ k $ Code (GenHS [|| (v' : vs') ||]) []) ||]
+      {-
 -}
+{-
   _ ->  {-# SCC step_fallthrough_ #-} genHS $ [|| do
     let s1 = showVS (reverse $$(runHS vs))
         s2 = showTys (map Values.typeOf (reverse $$(runHS vs)))
     throwError $ EvalCrashError at
       ("missing or ill-typed operand on stack (" ++ s1 ++ " : " ++ s2 ++ ")") ||]
+      -}
 
 showVS :: [Value] -> String
 showVS = show
@@ -544,10 +582,11 @@ showTys = show
 
 step :: (Regioned f,  Show1 f)
      => Code f IO -> (Code f IO -> CEvalT f IO r) -> CEvalT f IO r
-step (Code _ []) _ = error "Cannot step without instructions"
-step (Code vs (e:es)) k = do
-  -- traceM $ "step: " ++ showsPrec1 11 e ""
-  step_work vs (region e) (value e) $ k . (codeInstrs <>~ es)
+step (Code _ []) _ _ = error "Cannot step without instructions"
+step (Code vs (e:es)) k cfg =
+  genHS $ do
+    liftIO $ putStrLn $ "step: " ++ showsPrec1 11 e ""
+    run $ step_work vs (region e) (value e) (k . (codeInstrs <>~ es)) cfg
 
 {-# SPECIALIZE step
       :: Code Phrase IO -> (Code Phrase IO -> CEvalT Phrase IO r)
@@ -573,8 +612,10 @@ invoke mods inst func vs =
   let (at, inst') = case func of
         Func.AstFunc _ i f -> (region f, mods^?!ix i)
         _ -> (def, inst)
-  in genHS [||  do
-      reverse <$> $$(run $ eval (Code (GenHS [|| reverse $$(runHS vs) ||]) [Invoke func @@ at]) (newConfig mods inst')) ||]
+  in genHS $ do
+      --liftIO $ print (length (_miMemories inst'))
+      [||  do
+        reverse <$> $$(run $ eval (Code (GenHS [|| reverse $$(runHS vs) ||]) [Invoke func @@ at]) (newConfig mods inst')) ||]
 
 
 invokeByName :: (Regioned f, Show1 f)
@@ -613,18 +654,75 @@ i32 v at = case v of
 
 {- Modules -}
 
+{-
+      Func.AstFunc _ ref f -> genHS [|| do
+        locals' <- lift $ traverse newMut $
+          args ++ $$(TH.unsafeTExpCoerce $ TH.lift $ map defaultValue (value f^.funcLocals))
+        $$(let
+               inst' = getInst ref cfg
+               code' = Code emptyStack [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
+               frame' = Frame inst' (GenHS $ [|| locals' ||])
+           in run $ k $ Code (GenHS [|| vs' ||]) [Framed (length outs) frame' code' @@ at])
+           -}
+
+createVar :: ValueType -> (GenHS (Mutable IO Value) -> GenHS (EvalTHS IO r)) -> GenHS (EvalTHS IO r)
+createVar t k = GenHS [|| do
+  v <- lift $ newMut $$(liftTy $ defaultValue t)
+  $$(runHS $ k (GenHS [|| v ||]))
+  ||]
+
+createVars :: [ValueType] -> ([GenHS (Mutable IO Value)] -> GenHS (EvalTHS IO r)) -> GenHS (EvalTHS IO r)
+createVars [] k = k []
+createVars (x:xs) k = createVar x (\v -> createVars xs (\vs -> k (v:vs)))
+
 createFunc :: (Regioned f, Show1 f)
            => ModuleInst f IO -> ModuleRef -> f (Func f)
-           -> EvalTHS IO (ModuleFunc f IO)
-createFunc inst ref f = do
+           -> (ModuleFunc f IO -> EvalTHS IO (GenHS (EvalTHS IO r)))
+           -> EvalTHS IO (GenHS (EvalTHS IO r))
+createFunc inst ref f k = do
   ty <- type_ inst (value f^.funcType)
-
+  -- Make IORefs which will always be used by this function
+  -- There is one variable for each argument and one for each local
+  -- variable. When the function is called the argument variables are set
+  -- to the arguments and the local variables reset to their default
+  -- values.
   let FuncType ins outs = ty
-  let fbody = [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
-      cfg = newConfig undefined inst
-      compiled_func = GenHS [|| \vs -> $$(run $ eval (Code (GenHS [|| vs ||]) fbody) cfg) ||]
+  pure $ createVars ins (\arg_vs ->
+    createVars (value f^.funcLocals) (\local_vs -> GenHS $ do
+    let fbody = [Plain (Fix (Block outs (value f^.funcBody))) @@ region f]
+        cfg = Config (Frame inst (arg_vs ++ local_vs)) 300
+        compiled_func = GenHS [|| \vs -> do
+          -- Set arg vars to passed arguments
+          $$(run $ setArgs arg_vs (GenHS [|| vs ||]))
+          -- Reset local variables to default values
+          $$(run $ setLocals (zip (map defaultValue (value f^.funcLocals)) local_vs))
+          $$(run $ eval (Code (GenHS [|| vs ||]) fbody) cfg)
+          ||]
 
-  pure $ Func.allocCompiled ty (Func.CompiledFunc compiled_func)
+    join $ fmap runHS $ throwTH $ k $ Func.allocCompiled ty (Func.CompiledFunc compiled_func)
+    ))
+
+setLocals :: [(Value, GenHS (Mutable IO Value))] -> EvalT IO ()
+setLocals [] = genHS [|| return () ||]
+setLocals ((v, var): vs) = genHS [||
+                            (lift $ print ("setLocal", v)) >>
+                            (lift $ setMut $$(runHS var) v)
+                              >> $$(run $ setLocals vs) ||]
+
+setArgs :: [GenHS (Mutable IO Value)] -> GenHS [Value] -> EvalT IO ()
+setArgs [] as = genHS [|| return () ||]
+setArgs (var: vs) as = genHS [|| case $$(runHS as) of
+                                    v : vs' -> (lift $ setMut $$(runHS var) v) >>
+                                                (lift $ print ("setArgs", v))
+                                                >> $$(run $ setArgs vs (GenHS [|| vs' ||])) ||]
+
+
+createFuncs :: (Regioned f, Show1 f)
+           => ModuleInst f IO -> ModuleRef -> [f (Func f)]
+           -> ([ModuleFunc f IO] -> EvalTHS IO (GenHS (EvalTHS IO r)))
+           -> EvalTHS IO (GenHS (EvalTHS IO r))
+createFuncs inst ref [] k = k []
+createFuncs inst ref (f:fs) k = createFunc inst ref f (\f' -> createFuncs inst ref fs (\fs' -> k (f' : fs')))
 
 
 createHostFunc :: FuncType -> WQ ([Value] -> [Value]) -> ModuleFunc f m
@@ -703,8 +801,6 @@ initTable mods inst s@(value -> seg) =
       bound <- lift $ $$(runHS $ Table.size tab)
       when (bound < end_ || end_ < offset) $
         throwError $ EvalLinkError $$(liftTy (region (seg^.segmentIndex))) "elements segment does not fit table"
-    -- End up having to lift a ModuleFunc here which is problematic,
-    -- obviously.
       lift $ $$(runHS $ Table.blit tab (GenHS [|| offset ||]) (GenHS [|| V.fromList $$(runHS $ genFs fs) ||]))
       ||]
 
@@ -796,32 +892,39 @@ initialize :: (Regioned f, Show1 f)
            -> ((ModuleRef, ModuleInst f IO) -> GenHS (ExceptT EvalError IO r))
            -> GenHS (ExceptT EvalError IO r)
 initialize (value -> mod) names mods k = GenHS $ do
+  liftIO $ print mod
   inst <- throwTH $ resolveImports names mods (emptyModuleInst mod)
+  liftIO $ print inst
   let ref = nextKey mods
-  runHS $ createTables (mod^.moduleTables) (\ts -> GenHS $ do
-    fs <- throwTH $ traverse (createFunc inst ref) (mod^.moduleFuncs)
-    runHS $ createMemorys (mod^.moduleMemories) (\ms ->
+  liftIO $ print ref
+  runHS $ createTables (mod^.moduleTables) (\ts -> GenHS $
+    runHS $ createMemorys (mod^.moduleMemories) (\ms -> GenHS $
+      let inst2 = inst & miTables %~ (<> ts)
+                       & miMemories %~ (<> ms)
+      in join $ fmap runHS $ throwTH $ createFuncs inst2 ref (mod^.moduleFuncs) (\fs ->
 --      createGlobals mods inst (mod^.moduleGlobals) (\gs ->
-        let inst1 = inst
+        let inst3 = inst2
                 & miFuncs    %~ (<> fs) -- & traverse.Func._AstFunc._2 .~ ref))
                 & miTables   %~ (<> ts)
                 & miMemories %~ (<> ms)
 --                & miGlobals  %~ (<> gs)
-            mods1 = IM.insert ref inst1 mods
-            init_table = (flip map) (mod^.moduleElems) $ initTable mods1 inst1
-        in GenHS $ do
-        init_mem <- throwTH $ forM (mod ^. moduleData) $ initMemory mods1 inst1
-        es <- throwTH $ traverse (createExport inst1) (mod^.moduleExports)
-        let inst3 = inst1 & miExports .~ mconcat es
+            mods1 = IM.insert ref inst3 mods
+            init_table = (flip map) (mod^.moduleElems) $ initTable mods1 inst3
+        in pure $ GenHS $ do
+        liftIO $ print "mem"
+        init_mem <- throwTH $ forM (mod ^. moduleData) $ initMemory mods1 inst3
+        es <- throwTH $ traverse (createExport inst3) (mod^.moduleExports)
+        let inst4 = inst3 & miExports .~ mconcat es
+        liftIO $ print "Here"
         starts <- throwTH $ forM (mod^.moduleStart) $ \start -> do
-                    f <- func inst3 start
+                    f <- func inst4 start
                     return $ genHS [||
-                      void $ $$(run $ invoke (IM.insert ref inst3 mods) inst3 f (GenHS [|| [] ||])) ||]
+                      void $ $$(run $ invoke (IM.insert ref inst4 mods) inst4 f (GenHS [|| [] ||])) ||]
         [|| do
               $$(run $ spillList init_table)
               $$(run $ spillList init_mem)
               $$(run $ fromMaybe (genHS [|| return () ||]) starts)
-              $$(runHS $ k (ref, inst3)) ||] ))
+              $$(runHS $ k (ref, inst4)) ||] )))
 
 spillList :: [EvalT IO ()] -> EvalT IO ()
 spillList [] = genHS [|| return () ||]
