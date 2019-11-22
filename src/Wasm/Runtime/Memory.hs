@@ -272,14 +272,14 @@ doubleToBits x = runST (cast x)
 doubleFromBits :: Int64 -> Double
 doubleFromBits x = runST (cast x)
 
-loadValue :: MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS ValueType
+loadValue :: MemoryInst IO -> GenHS Address -> GenHS Offset -> ValueType
           -> GenHS (ExceptT MemoryError IO Value)
 loadValue mem a o t = GenHS [||
-  $$(runHS $ loadn mem a o (GenHS [|| (valueTypeSize $$(runHS t)) ||])) >>= \n -> pure $ case $$(runHS t) of
-    I32Type -> Values.I32 (fromIntegral n)
-    I64Type -> Values.I64 n
-    F32Type -> Values.F32 (floatFromBits (fromIntegral n))
-    F64Type -> Values.F64 (doubleFromBits n) ||]
+  $$(runHS $ loadn mem a o (GenHS $ liftTy $ valueTypeSize t)) >>= \n -> pure $ $$(case t of
+    I32Type -> [|| Values.I32 (fromIntegral n) ||]
+    I64Type -> [|| Values.I64 n ||]
+    F32Type -> [|| Values.F32 (floatFromBits (fromIntegral n)) ||]
+    F64Type -> [|| Values.F64 (doubleFromBits n) ||] ) ||]
 
 storeValue ::
               MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Value
@@ -304,18 +304,18 @@ loadPacked ::
            -> MemoryInst IO
            -> GenHS Address
            -> GenHS Offset
-           -> GenHS ValueType
+           -> ValueType
            -> GenHS (ExceptT MemoryError IO Value)
 loadPacked sz ext mem a o t = GenHS $ [||
-  assert (packedSize sz <= valueTypeSize $$(runHS t)) $ do
+  assert (packedSize sz <= $$(liftTy $ valueTypeSize t)) $ do
     let n = packedSize sz
     v <- $$(runHS $ loadn mem a o (GenHS [|| n ||]))
     let n = packedSize sz
     let x = extend v n ext
-    case $$(runHS t) of
-      I32Type -> pure $ Values.I32 (fromIntegral x)
-      I64Type -> pure $ Values.I64 x
-      _ -> throwError MemoryTypeError ||]
+    $$(case t of
+      I32Type -> [|| pure $ Values.I32 (fromIntegral x) ||]
+      I64Type -> [|| pure $ Values.I64 x ||]
+      _ -> [|| throwError MemoryTypeError ||] ) ||]
 
 storePacked ::
                PackSize -> MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Value

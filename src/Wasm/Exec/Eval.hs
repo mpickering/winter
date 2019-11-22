@@ -453,8 +453,8 @@ instr vs at e' k' cfg =
           (I32 i : vs') -> do
             let addr = fromIntegral $ i64_extend_u_i32 (fromIntegral i)
             eres <- lift $ runExceptT $ $$(case op^.memorySize of
-              Nothing        -> [|| $$(runHS $ Memory.loadValue mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS $ liftTy ty)) ||]
-              Just (sz, ext) -> [|| $$(runHS $ Memory.loadPacked sz ext mem (GenHS [|| addr ||]) (GenHS $ liftTy off) (GenHS $ liftTy ty)) ||])
+              Nothing        -> [|| $$(runHS $ Memory.loadValue mem (GenHS [|| addr ||]) (GenHS $ liftTy off) ty) ||]
+              Just (sz, ext) -> [|| $$(runHS $ Memory.loadPacked sz ext mem (GenHS [|| addr ||]) (GenHS $ liftTy off) ty) ||])
             case eres of
               Right v' -> do
 --                lift $ print ("loaded", i)

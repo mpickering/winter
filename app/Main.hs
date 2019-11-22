@@ -11,6 +11,6 @@ module Main where
 
 import StaticMain
 
-
 main = $$(staticMain (Options "init" "loop.wasm"))
+
 
