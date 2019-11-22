@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -ddump-splices -ddump-simpl #-}
+{-# OPTIONS_GHC -ddump-splices -ddump-simpl -ddump-ds -dsuppress-all #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE LambdaCase         #-}
 {-# LANGUAGE OverloadedStrings  #-}
@@ -10,6 +10,7 @@
 module Main where
 
 import StaticMain
+
 
 main = $$(staticMain (Options "init" "loop.wasm"))
 

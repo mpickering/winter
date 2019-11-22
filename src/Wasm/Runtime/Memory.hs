@@ -83,9 +83,12 @@ alloc (Limits min' mmax) k = case create min' of
             } ) ||]
 
 bound :: MemoryInst IO -> GenHS (IO Size)
-bound mem = GenHS $ [|| do
-  m <- getMut $$(runHS $ mem^.miContent)
-  pure $ fromIntegral $ VM.length m ||]
+bound mem = GenHS $ [|| bound_raw $$(runHS $ mem^.miContent) ||]
+
+bound_raw :: (Mutable IO (MVector s a)) -> IO Size
+bound_raw mem = do
+  m <- getMut mem
+  pure $ fromIntegral $ VM.length m
 
 size :: MemoryInst IO -> GenHS (IO Size)
 size mem = GenHS [|| do
@@ -114,13 +117,18 @@ grow mem delta = GenHS $ [|| do
           setMut $$(runHS $ mem^.miContent) mv' ||]
 
 loadByte :: MemoryInst IO -> GenHS Address -> GenHS (ExceptT MemoryError IO Word8)
-loadByte mem a = GenHS $ [|| do
-  bnd <- lift $ $$(runHS $ bound mem)
-  if | $$(runHS a) >= fromIntegral bnd
+loadByte mem a = GenHS $ [|| loadByte_raw $$(runHS $ mem ^. miContent)
+                                          $$(runHS $ a) ||]
+
+
+loadByte_raw :: (Mutable IO (MVector RealWorld Word8)) -> Address -> (ExceptT MemoryError IO Word8)
+loadByte_raw mem a = do
+  bnd <- lift $ bound_raw mem
+  if | a >= fromIntegral bnd
         -> throwError MemoryBoundsError
      | otherwise -> lift $ do
-        mv <- getMut $$(runHS $ mem ^.miContent)
-        VM.read mv (fromIntegral $$(runHS a)) ||]
+        mv <- getMut mem
+        VM.read mv (fromIntegral a)
 
 storeByte :: MemoryInst IO -> GenHS Address -> GenHS Word8
           -> GenHS (ExceptT MemoryError IO ())
@@ -133,6 +141,15 @@ storeByte mem ca cb = GenHS $ [|| do
      | otherwise -> lift $ do
         mv <- getMut $$(runHS $ mem^.miContent)
         VM.write mv (fromIntegral a) b ||]
+
+storeByte_raw :: Mutable IO (MVector RealWorld Word8) -> Address -> Word8 -> ExceptT MemoryError IO ()
+storeByte_raw mem a b = do
+  bnd <- lift $ bound_raw mem
+  if | a >= fromIntegral bnd ->
+       throwError MemoryBoundsError
+     | otherwise -> lift $ do
+        mv <- getMut mem
+        VM.write mv (fromIntegral a) b
 
 loadBytes :: MemoryInst IO -> GenHS Address -> GenHS Size
           -> GenHS (ExceptT MemoryError IO (Vector Word8))
@@ -156,6 +173,7 @@ effectiveAddress a o = do
     then throwError MemoryBoundsError
     else pure ea
 
+{-
 loadn :: MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Size
       -> GenHS (ExceptT MemoryError IO Int64)
 loadn mem a o n = GenHS $ [||
@@ -172,6 +190,28 @@ loadn mem a o n = GenHS $ [||
       addr <- effectiveAddress $$(runHS a) $$(runHS o)
       loop addr $$(runHS n)
   ||]
+  -}
+
+loadn :: MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Size
+      -> GenHS (ExceptT MemoryError IO Int64)
+loadn mem a o n = GenHS [|| loadn_raw $$(runHS $ mem ^. miContent) $$(runHS a)
+                                      $$(runHS o) $$(runHS n) ||]
+
+loadn_raw :: Mutable IO (MVector RealWorld Word8) -> Address -> Offset -> Size
+      -> (ExceptT MemoryError IO Int64)
+loadn_raw mem a o n =
+  let
+    loop a' n' =
+       if n' == 0
+        then pure 0
+        else do
+          r <- loop (a' + 1) (n' - 1)
+          let x = shiftL r 8
+          b <- loadByte_raw mem a'
+          pure $ fromIntegral b .|. x
+  in assert (n > 0 && n <= 8) $ do
+      addr <- effectiveAddress a o
+      loop addr n
 
 storen ::
           MemoryInst IO -> GenHS Address -> GenHS Offset -> GenHS Size -> GenHS Int64
@@ -183,7 +223,7 @@ storen mem ca co cn cx = GenHS $ [||
       x = $$(runHS cx)
   in assert (n > 0 && n <= 8) $ do
       addr <- effectiveAddress a o
-      $$(runHS $ storen_loop mem (GenHS [|| addr ||]) cn cx)
+      storen_loop_raw $$(runHS $ mem^.miContent) addr n x
       ||]
 
 storen_loop :: MemoryInst IO -> GenHS Address -> GenHS Size -> GenHS Int64 -> GenHS (ExceptT MemoryError IO ())
@@ -199,6 +239,21 @@ storen_loop mem addr n x = GenHS [||
             $$(runHS $ storeByte mem (GenHS [|| a' ||]) (GenHS [|| x'' ||]) )
     in loop $$(runHS addr) $$(runHS n) $$(runHS x)
     ||]
+
+storen_loop_raw :: Mutable IO (MVector RealWorld Word8) -> Address -> Size -> Int64 -> ExceptT MemoryError IO ()
+storen_loop_raw mem addr n x =
+    let loop :: Address -> Size -> Int64 -> ExceptT MemoryError IO ()
+        loop a' n' x'
+          | n' <= 0 = return ()
+          | otherwise = do
+            loop (a' + 1) (n' - 1) (shiftR x' 8)
+
+            let x'' :: Word8
+                x'' = fromIntegral x' .&. 0xff
+            storeByte_raw mem a' x''
+    in loop addr n x
+
+
 
 cast :: (MArray (STUArray s) a (ST s), MArray (STUArray s) b (ST s))
      => a -> ST s b
